@@ -1,0 +1,17 @@
+# Foundry
+out/
+cache/
+broadcast/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Node (merkle tooling)
+merkle/node_modules/
+merkle/out/
+node_modules/
+
+# OS
+.DS_Store
