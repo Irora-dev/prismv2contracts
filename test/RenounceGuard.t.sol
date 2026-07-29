@@ -37,9 +37,12 @@ contract VaultStub {
 /// terminal: `seed()` is the only owner-gated function and nothing else can ever initialize the pool,
 /// so the token would be inert with its entire supply stranded. These assert the guard refuses that.
 ///
-/// The guards are exercised through `renounce(address)` rather than `run()` so no process-wide env var
-/// is involved — `vm.setEnv` is global and forge runs a contract's tests in parallel, so env-driven
-/// tests race and flake.
+/// The guards are exercised through the two-argument `renounce(address,uint256)`, never the one-argument
+/// form and never `run()`. Both of those read `MIN_SEED_LIQUIDITY` from the environment, and Foundry
+/// auto-loads `.env` from the project root — so an env-reading test passes or fails depending on whether
+/// the operator has generated a `.env` yet. That is not hypothetical: it turned four of these green tests
+/// red the moment a `.env` existed, which is the state EVERY real operator is in from step 2 onward.
+/// Each test states its own floor explicitly, so ambient environment cannot reach them.
 contract RenounceGuard is Test {
     Renounce script_;
     HookStub hook;
@@ -53,7 +56,7 @@ contract RenounceGuard is Test {
         hook.setSeeded(false);
         hook.setOwner(address(this));
         vm.expectRevert(bytes("hook is NOT seeded - renouncing now would brick it permanently"));
-        script_.renounce(address(hook));
+        script_.renounce(address(hook), 0);   // 0 = no seed floor; never read it from the environment
         assertFalse(hook.renounced(), "nothing was renounced");
     }
 
@@ -61,10 +64,13 @@ contract RenounceGuard is Test {
         hook.setSeeded(true);
         hook.setOwner(address(0xDEADBEEF));
         vm.expectRevert(bytes("sender is not the current owner"));
-        script_.renounce(address(hook));
+        script_.renounce(address(hook), 0);   // 0 = no seed floor; never read it from the environment
         assertFalse(hook.renounced(), "nothing was renounced");
     }
 
+    /// The one-argument entry point, exercised deliberately and only here: this revert fires before the
+    /// environment is ever read, so it is the one case where the ambient `MIN_SEED_LIQUIDITY` cannot reach
+    /// the assertion. That keeps `renounce(address)` covered without making the suite env-dependent.
     function test_RefusesACodelessHook() public {
         vm.expectRevert(bytes("HOOK has no code"));
         script_.renounce(address(0xC0DE1355));
@@ -76,7 +82,7 @@ contract RenounceGuard is Test {
         // `renounce` is entered by an external call from this test, so its `msg.sender` — the address
         // the owner check compares against — is this contract, not the script.
         hook.setOwner(address(this));
-        script_.renounce(address(hook));
+        script_.renounce(address(hook), 0);   // 0 = no seed floor; never read it from the environment
         assertTrue(hook.renounced(), "renounced");
         assertEq(hook.owner(), address(0), "owner cleared");
     }
@@ -102,7 +108,7 @@ contract RenounceGuard is Test {
         _seededOwned();
         hook.setVault(address(0xBADC0DE)); // an address that never received a deployment
         vm.expectRevert(bytes("MIGRATION_VAULT has no code - the airdrop reserve is unreachable"));
-        script_.renounce(address(hook));
+        script_.renounce(address(hook), 0);   // 0 = no seed floor; never read it from the environment
         assertFalse(hook.renounced(), "nothing was renounced");
     }
 
@@ -114,7 +120,7 @@ contract RenounceGuard is Test {
         _seededOwned();
         VaultStub vault = new VaultStub();   // deployed, but setToken has not run yet
         hook.setVault(address(vault));
-        script_.renounce(address(hook));
+        script_.renounce(address(hook), 0);   // 0 = no seed floor; never read it from the environment
         assertTrue(hook.renounced(), "an unopened airdrop blocked the renounce");
     }
 
@@ -126,7 +132,7 @@ contract RenounceGuard is Test {
         vault.setToken(address(0xA11CE));    // wired, but not to this hook
         hook.setVault(address(vault));
         vm.expectRevert(bytes("MIGRATION_VAULT is wired to a different token - do NOT renounce"));
-        script_.renounce(address(hook));
+        script_.renounce(address(hook), 0);   // 0 = no seed floor; never read it from the environment
         assertFalse(hook.renounced(), "nothing was renounced");
     }
 
@@ -135,7 +141,7 @@ contract RenounceGuard is Test {
         VaultStub vault = new VaultStub();
         vault.setToken(address(hook));
         hook.setVault(address(vault));
-        script_.renounce(address(hook));
+        script_.renounce(address(hook), 0);   // 0 = no seed floor; never read it from the environment
         assertTrue(hook.renounced(), "renounced");
     }
 
@@ -143,7 +149,7 @@ contract RenounceGuard is Test {
     function test_RenouncesWithNoAirdropVaultConfigured() public {
         _seededOwned();
         hook.setVault(address(0));
-        script_.renounce(address(hook));
+        script_.renounce(address(hook), 0);   // 0 = no seed floor; never read it from the environment
         assertTrue(hook.renounced(), "renounced");
     }
 

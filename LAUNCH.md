@@ -9,6 +9,24 @@ this file is what you actually execute.
 > but the procedure launches a token with a fixed supply and an immutable contract, so it begins when a
 > human says begin, not when you finish reading.
 
+## Or just run it
+
+```bash
+node launch.mjs
+```
+
+One command, guided, resumable. It works out where you are from chain state, runs every step that does not
+need a key, stops at the three decisions that cannot be undone, and checks each result before moving on.
+Every command it runs is printed first.
+
+It never asks for a private key: signing steps hand your terminal straight to Foundry, so a keystore
+password prompt or a Ledger confirmation happens between you and Foundry and the wrapper never sees it. It
+also never prints `.env`, `SALT_NONCE`, or your RPC URL — that URL usually embeds an API key, so commands
+are shown as `$RPC_URL`.
+
+Run it again after the delay and it picks up at §10b. The rest of this file is the same procedure written
+out, and remains the reference for *why* each number matters.
+
 ## Who does what
 
 An agent can do all of the preparation and all of the verification. It cannot do the signing or the
