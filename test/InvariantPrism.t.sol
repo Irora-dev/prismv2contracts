@@ -32,11 +32,11 @@ interface IPrismLike { function balanceOf(address) external view returns (uint25
 
 contract MockPOSM {
     uint256 public feeEth;
-    uint256 public feePrism;          // the PRISM leg — previously absent, so PRISM fees were NEVER
-    address public prism;             // exercised and PRISM solvency was asserted nowhere
-    /// Ghost counters. Without them the only available measure of the fee stream was the hook's entire
-    /// PRISM balance, which is dominated by unseeded float — that is what made the solvency invariant
-    /// unfalsifiable (~4,341 PRISM of slack against a promise base capped at 160).
+    uint256 public feePrism;          // the PRISM leg: drive it, or PRISM fees and PRISM solvency go
+    address public prism;             // entirely unexercised
+    /// Ghost counters. Keep them: without them the only available measure of the fee stream is the hook's
+    /// entire PRISM balance, which is dominated by unseeded float, and a solvency invariant written
+    /// against that cannot fail (~4,341 PRISM of slack against a promise base capped at 160).
     uint256 public totalPrismPaid;    // PRISM this mock has ever delivered into the hook
     uint256 public prismLegFirings;   // times the PRISM leg actually paid
     uint256 public prismLegStarved;   // times it could not, because the reservoir was empty
@@ -48,9 +48,9 @@ contract MockPOSM {
         if (feeEth > 0) { (bool ok,) = msg.sender.call{value: feeEth}(""); require(ok); }
         // Mirrors the real collect: PRISM arrives INTO the hook, which pokeFees sees as a gain.
         if (feePrism > 0 && prism != address(0)) {
-            // Reservoir exhaustion used to be INVISIBLE: the transfer reverted inside pokeFees'
-            // try/catch, so most pokes silently exercised no PRISM leg at all while the fuzzer still
-            // reported 0 reverts. Now starvation is counted (and the harness refills, see Handler.poke).
+            // Reservoir exhaustion is INVISIBLE unless it is counted: the transfer reverts inside
+            // pokeFees' try/catch, so a starved poke exercises no PRISM leg at all while the fuzzer still
+            // reports 0 reverts. Count starvation (and refill in the harness, see Handler.poke).
             if (IPrismLike(prism).balanceOf(address(this)) < feePrism) { prismLegStarved++; return; }
             IPrismMin(prism).transfer(msg.sender, feePrism);
             totalPrismPaid += feePrism;
@@ -123,13 +123,13 @@ contract Handler is Test {
         try hook.syncNFTs(bound(max, 0, 400)) {} catch {}
     }
 
-    /// Drives BOTH fee legs. The PRISM leg was previously never exercised at all, so the 80/20 split,
-    /// the PRISM burn and PRISM solvency all went unfuzzed across 30k sequences.
+    /// Drives BOTH fee legs. An ETH-only handler leaves the 80/20 split, the PRISM burn and PRISM
+    /// solvency unfuzzed across every sequence, however many there are.
     ///
-    /// The reservoir is TOPPED UP here rather than being allowed to run dry. Exhaustion made the leg
-    /// no-op silently inside pokeFees' try/catch, so the vast majority of pokes exercised nothing while
-    /// the run still looked clean. The float the mock draws from is real supply moved in setUp, so
-    /// topping up means moving it back rather than minting.
+    /// The reservoir is TOPPED UP here rather than being allowed to run dry: exhaustion makes the leg
+    /// no-op silently inside pokeFees' try/catch, so pokes exercise nothing while the run still looks
+    /// clean. The float the mock draws from is real supply moved in setUp, so topping up means moving it
+    /// back rather than minting.
     function poke(uint256 fee, uint256 feeP) external {
         posm.setFeeEth(bound(fee, 0, 3 ether));
         uint256 want = bound(feeP, 0, 2 ether);
@@ -270,10 +270,10 @@ contract InvariantPrism is Test {
     }
     /// PRISM solvency, measured against the FEE STREAM rather than the hook's whole balance.
     ///
-    /// The earlier version asserted `balanceOf(hook) >= sumPendingPRISM`, which could not fail: the
-    /// hook's balance is dominated by unseeded float (~4,341 PRISM in this harness) while the promises
-    /// were capped by the mock reservoir at ~160, leaving three orders of magnitude of dead slack. It
-    /// also compared against *captured* pending only, ignoring the larger unrealised obligation.
+    /// Do NOT write this as `balanceOf(hook) >= sumPendingPRISM`: that cannot fail. The hook's balance is
+    /// dominated by unseeded float (~4,341 PRISM in this harness) while the promises are capped by the mock
+    /// reservoir at ~160, which leaves three orders of magnitude of dead slack — and it compares against
+    /// *captured* pending only, ignoring the larger unrealised obligation.
     ///
     /// The tight statement is conservation of the stream the fee layer actually controls: every PRISM
     /// the hook received as a fee has either been burned, paid out to a holder, or is still held for
@@ -303,9 +303,9 @@ contract InvariantPrism is Test {
     /// asserting `prismLegFirings > 0` in `afterInvariant` looks like the fix. It is flaky by
     /// construction: `afterInvariant` runs after EACH run, not once per campaign, and this suite is 500
     /// runs x depth 60. With nine handler actions a 60-call sequence draws `poke` only ~6 times, and
-    /// `bound(feeP, 0, 2 ether)` can return 0, so sequences with zero firings genuinely occur — measured
-    /// directly while building this: a failing sequence had `poke` called ZERO times, with
-    /// `modifyLiquidities` entered only 3 times, all via `_maybePoke` on ordinary transfers.
+    /// `bound(feeP, 0, 2 ether)` can return 0, so sequences with zero firings genuinely occur: a sequence
+    /// can reach the end with `poke` called ZERO times and `modifyLiquidities` entered only via
+    /// `_maybePoke` on ordinary transfers.
     ///
     /// Coverage is therefore proven DETERMINISTICALLY in `test/FeeLegUnit.t.sol`, which drives the PRISM
     /// leg with fixed inputs and checks the 80/20 split, the burn and the accumulator exactly. Random

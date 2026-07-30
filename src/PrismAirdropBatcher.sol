@@ -123,9 +123,9 @@ contract PrismAirdropBatcher {
                 // Note it does NOT surface as empty returndata: `claim` wraps the token transfer in a
                 // low-level call and converts a failure into `TransferFailed()`, so a starved row is
                 // indistinguishable by selector from a token that genuinely refused. Both are treated
-                // as retriable and STOP the loop at this index, because advancing past a holder who
-                // was never paid is what previously produced a "list complete" result with a silent
-                // hole in it.
+                // as retriable and STOP the loop at this index. Advancing past a holder who was never
+                // paid is what turns an incomplete run into a "list complete" result with a silent hole
+                // in it, so it must not happen.
                 //
                 // Note what that does NOT cover, because the gas test below is what actually decides:
                 // a vault genuinely short of reserve reverts CHEAPLY (solady raises

@@ -10,7 +10,7 @@ import {IHooks}   from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 
-/// AUDIT ROUND 2 — CONTRACTS. The surfaces five prior rounds did not attack:
+/// The ERC-721 surface of the fee-share mirror:
 /// PrismArt's string assembly, PrismMirror's whole ERC-721 surface (including EIP-7702 delegated
 /// EOAs, which are 476 of the 1203 airdrop recipients), and BaseHook's callback gates.
 
@@ -173,14 +173,14 @@ contract Mirror721Unit is Test {
     /// 236 lines of string/bytes assembly. Every field is derived from a byte of the seed, so the
     /// whole input space is reachable by brute force from `_deriveSeed(id) = keccak(id, hook)`.
     /// A revert here would permanently break `tokenURI` for a live token.
-    function testFuzz_R2C_artNeverReverts(bytes32 seed) public pure {
+    function testFuzz_artNeverReverts(bytes32 seed) public pure {
         string memory uri = PrismArt.tokenURI(type(uint256).max, seed);
         assertGt(bytes(uri).length, 0);
     }
 
     /// Independently pin the five field derivations at both ends of each byte, so a future edit that
     /// widens one (e.g. `* 200` on a uint16) is caught rather than silently overflowing.
-    function test_R2C_artFieldBoundsAtEveryByteExtreme() public pure {
+    function test_artFieldBoundsAtEveryByteExtreme() public pure {
         uint8[3] memory probes = [0, 128, 255];
         for (uint256 a; a < 3; ++a) for (uint256 b; b < 3; ++b) for (uint256 c; c < 3; ++c)
         for (uint256 d; d < 3; ++d) for (uint256 e; e < 3; ++e) {
@@ -195,7 +195,7 @@ contract Mirror721Unit is Test {
 
     /// tokenURI is reachable for every live id and reverts for none of them; and it gates nothing
     /// that moves value (proved by claiming with the art path exercised in the same test).
-    function test_R2C_tokenURILiveForEveryIdAndGatesNoValue() public {
+    function test_tokenURILiveForEveryIdAndGatesNoValue() public {
         uint256[] memory ids = hook.ownedTokensOf(alice);
         assertEq(ids.length, 10);
         for (uint256 i; i < ids.length; ++i) {
@@ -212,7 +212,7 @@ contract Mirror721Unit is Test {
     /*──────────────────── EIP-7702 delegated EOAs ────────────────────*/
 
     /// A delegated EOA whose delegate implements the hook: safeTransferFrom works normally.
-    function test_R2C_7702_compliantDelegateAcceptsSafeTransfer() public {
+    function test_7702_compliantDelegateAcceptsSafeTransfer() public {
         Delegate_Compliant impl = new Delegate_Compliant();
         address eoa = address(0xE0A1);
         _delegate(eoa, address(impl));
@@ -227,7 +227,7 @@ contract Mirror721Unit is Test {
     /// a real compatibility edge for 476 of the 1203 recipients — but it is NOT a loss of funds:
     /// the state is restored exactly, and plain `transferFrom` (and every ERC-20 path, which is how
     /// the airdrop actually delivers) is unaffected.
-    function test_R2C_7702_nonCompliantDelegateBlocksSafeTransferButLosesNothing() public {
+    function test_7702_nonCompliantDelegateBlocksSafeTransferButLosesNothing() public {
         address eoaSilent = address(0xE0A2);
         address eoaStrict = address(0xE0A3);
         _delegate(eoaSilent, address(new Delegate_SilentFallback()));
@@ -261,7 +261,7 @@ contract Mirror721Unit is Test {
 
     /// A delegated EOA can claim and withdraw exactly like a plain EOA: the fee layer never branches
     /// on code length, so nothing about 7702 can strand a recipient's fees.
-    function test_R2C_7702_delegatedEOAClaimsAndWithdrawsNormally() public {
+    function test_7702_delegatedEOAClaimsAndWithdrawsNormally() public {
         assertEq(hook.nftBalanceOf(eoaPre), 3, "setUp did not mirror-mint for the delegated EOA");
         uint256 shares = hook.totalShares();
 
@@ -285,7 +285,7 @@ contract Mirror721Unit is Test {
 
     /*──────────────── PrismMirror ERC-721 surface ────────────────*/
 
-    function test_R2C_mirrorMetadataAndIntrospection() public view {
+    function test_mirrorMetadataAndIntrospection() public view {
         assertEq(mirror.name(), "Prism-LP");
         assertEq(mirror.symbol(), "PRISM-LP");
         assertTrue(mirror.supportsInterface(0x01ffc9a7)); // ERC165
@@ -298,7 +298,7 @@ contract Mirror721Unit is Test {
 
     /// Only the hook may make the mirror emit an event, so nobody can forge an ERC-721 Transfer that
     /// an indexer would read as a change of ownership.
-    function test_R2C_mirrorEventEmittersAreHookOnly() public {
+    function test_mirrorEventEmittersAreHookOnly() public {
         vm.startPrank(bob);
         vm.expectRevert(); mirror.emitTransfer(alice, bob, 1);
         vm.expectRevert(); mirror.emitApproval(alice, bob, 1);
@@ -308,7 +308,7 @@ contract Mirror721Unit is Test {
 
     /// Only the mirror may drive the hook's NFT handlers, so `caller` cannot be spoofed — which is
     /// what the entire NFT authorisation model rests on.
-    function test_R2C_hookNFTHandlersAreMirrorOnly() public {
+    function test_hookNFTHandlersAreMirrorOnly() public {
         uint256 id = hook.ownedTokensOf(alice)[0];
         vm.startPrank(bob);
         vm.expectRevert(); hook.handleNFTTransfer(alice, bob, id, alice);       // spoofed caller=owner
@@ -320,7 +320,7 @@ contract Mirror721Unit is Test {
 
     /// Full approval semantics, including that a move CLEARS the single-token approval (so a stale
     /// approval can never be replayed against a new owner) while operator approval persists.
-    function test_R2C_approvalSemanticsAndClearingOnMove() public {
+    function test_approvalSemanticsAndClearingOnMove() public {
         uint256 id = hook.ownedTokensOf(alice)[0];
 
         vm.prank(bob); vm.expectRevert(); mirror.approve(bob, id);           // not owner/operator
@@ -344,7 +344,7 @@ contract Mirror721Unit is Test {
 
     /// The v2 core fix, exercised through the mirror for EVERY excluded address, including the two
     /// the fix specifically added (Permit2 and the mirror itself) and the burn sink.
-    function test_R2C_mirrorCannotParkAShareOnAnyExcludedAddress() public {
+    function test_mirrorCannotParkAShareOnAnyExcludedAddress() public {
         uint256 id = hook.ownedTokensOf(alice)[0];
         address[7] memory bad =
             [HOOKA, address(pm), address(posm), address(p2), address(mirror), DEAD, address(0)];
@@ -360,7 +360,7 @@ contract Mirror721Unit is Test {
     }
 
     /// ERC-721 conformance of the query surface: zero-address balance throws, unminted owner throws.
-    function test_R2C_mirrorQueryConformance() public {
+    function test_mirrorQueryConformance() public {
         vm.expectRevert(); mirror.balanceOf(address(0));
         vm.expectRevert(); mirror.ownerOf(12345);
         vm.expectRevert(); hook.nftGetApproved(12345);
@@ -370,7 +370,7 @@ contract Mirror721Unit is Test {
     /// safeTransferFrom's receiver check runs AFTER the move, so the guard is released while
     /// onERC721Received executes. Prove that a receiver reentering the entire value surface from
     /// there can take nothing it is not owed, and that the ledgers stay exact.
-    function test_R2C_reentrantReceiverFromOnERC721ReceivedGainsNothing() public {
+    function test_reentrantReceiverFromOnERC721ReceivedGainsNothing() public {
         ReenteringReceiver rr = new ReenteringReceiver();
         rr.wire(hook, mirror);
 
@@ -411,7 +411,7 @@ contract Mirror721Unit is Test {
     }
 
     /// A wrong magic value is rejected and the move is rolled back.
-    function test_R2C_badMagicReceiverRollsBack() public {
+    function test_badMagicReceiverRollsBack() public {
         BadMagicReceiver bad = new BadMagicReceiver();
         uint256 id = hook.ownedTokensOf(alice)[0];
         uint256 balBefore = hook.balanceOf(alice);
@@ -426,7 +426,7 @@ contract Mirror721Unit is Test {
     /// The declared permission set is exactly {beforeInitialize, afterSwap}. In particular
     /// afterSwapReturnDelta is FALSE, which is what makes this an LP that gives its earnings away
     /// rather than a fee redirector, and beforeSwap is FALSE so no swap can be taxed or blocked.
-    function test_R2C_permissionBitmapIsExactlyTwoFlags() public view {
+    function test_permissionBitmapIsExactlyTwoFlags() public view {
         Hooks.Permissions memory p = hook.getHookPermissions();
         assertTrue(p.beforeInitialize);
         assertTrue(p.afterSwap);
@@ -460,7 +460,7 @@ contract Mirror721Unit is Test {
 
     /// Every callback is PoolManager-gated, and every undeclared one additionally reverts
     /// HookNotImplemented even when the PoolManager is the caller. Two independent locks.
-    function test_R2C_everyCallbackGated() public {
+    function test_everyCallbackGated() public {
         PoolKey memory k = PoolKey({
             currency0: Currency.wrap(address(0)), currency1: Currency.wrap(HOOKA),
             fee: 10_000, tickSpacing: 200, hooks: IHooks(HOOKA)

@@ -19,10 +19,9 @@ import {Deploy} from "./Deploy.s.sol";
 ///      configuration — and it cannot be confused for the real thing, because there is nothing here to
 ///      broadcast even by accident.
 ///
-///      It shares code with the deploy rather than restating it. That distinction matters: an earlier
-///      version of the test coverage replayed these checks inline instead of calling them, and mutation
-///      testing showed that reverting a real guard left every test green. Calling `Deploy`'s own
-///      validators means this cannot drift from what actually runs.
+///      It shares code with the deploy rather than restating it, and it has to stay that way: a check
+///      replayed here instead of called from `Deploy` can keep passing while the real guard is weakened
+///      or removed. Calling `Deploy`'s own validators means this cannot drift from what actually runs.
 contract Preflight is Script {
     function run() external {
         Deploy d = new Deploy();

@@ -121,7 +121,7 @@ contract HardeningUnit is Test {
         hook.transfer(to, wholeTokens * 1 ether);
     }
 
-    // ─────────────────────────── M4: pull-based claims ───────────────────────────
+    // ─────────────────────────── pull-based claims ───────────────────────────
 
     /// claim() must NOT push ETH; it credits pendingETH and value leaves only via withdraw.
     function test_ClaimIsPullBasedNoPush() public {
@@ -158,7 +158,7 @@ contract HardeningUnit is Test {
         assertEq(user2.balance, 1 ether, "ETH delivered to the chosen recipient");
     }
 
-    // ─────────────────────────── M1: try/catch poke ───────────────────────────
+    // ─────────────────────────── try/catch poke ───────────────────────────
 
     /// A reverting POSM must not brick transfers or claims.
     function test_PokeFailureDoesNotBrickTransfersOrClaims() public {
@@ -204,7 +204,7 @@ contract HardeningUnit is Test {
         assertEq(IHook(hookAddr).totalShares(), 0);
     }
 
-    // ─────────────────────────── M2: init-race gate ───────────────────────────
+    // ─────────────────────────── init-race gate ───────────────────────────
 
     function _hostKey() internal view returns (PoolKey memory) {
         return PoolKey({
@@ -232,7 +232,7 @@ contract HardeningUnit is Test {
         IHooks(V2_ADDR).beforeInitialize(address(0xBAD), key, uint160(1));
     }
 
-    // ─────────────────────────── M3: bounded mint + sync ───────────────────────────
+    // ─────────────────────────── bounded mint + sync ───────────────────────────
 
     /// A large receive under-mirrors (capped) instead of OOG-reverting; syncNFTs catches up.
     function test_MintCapUnderSyncsAndSyncCatchesUp() public {
@@ -382,7 +382,7 @@ contract HardeningUnit is Test {
         assertEq(hook.nftBalanceOf(user), 4);
     }
 
-    // ─────────────────────────── H1: anti-atomic-JIT ───────────────────────────
+    // ─────────────────────────── anti-atomic-JIT ───────────────────────────
 
     /// The atomic mint->poke->claim skim yields ZERO to the attacker (quarantine), while the
     /// fees are genuinely available (a pre-existing holder can claim them). The attacker mints

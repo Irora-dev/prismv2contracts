@@ -36,7 +36,8 @@ contract GasCeiling is Test {
     address constant OWNER   = address(0xB0B);
     uint256 constant BLOCK_GAS_LIMIT = 30_000_000;
     uint256 constant TX_GAS_CAP = 16_777_216; // EIP-7825
-    /// Measured with a hot accumulator (see the RT2 surface audit): gas per whole-token move.
+    /// Measured with a hot accumulator, which is the only production-relevant state: gas per
+    /// whole-token move.
     uint256 constant GAS_PER_MOVE_HOT = 31_668;
 
     IHook hook;

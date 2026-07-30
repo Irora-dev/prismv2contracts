@@ -74,14 +74,14 @@ contract MintClampUnit is Test {
     }
 
     /// A self-transfer moves no value, so it must mirror nothing. The `to != from` guard in
-    /// `_afterTokenTransfer` is the ONLY thing enforcing that, and nothing tested it until now:
-    /// mutation testing removed the guard and all 95 tests stayed green.
+    /// `_afterTokenTransfer` is the ONLY thing enforcing that, so it needs a test that fails when the
+    /// guard is removed — and this is that test.
     ///
-    /// It is not a harmless mutant. `_realignPair` does NOT independently neutralise a self-transfer —
+    /// Removing it is not harmless. `_realignPair` does NOT independently neutralise a self-transfer —
     /// with `from == to` it computes `fromLoses = 0` but `toGains = target - current`, so the whole
-    /// backlog is eligible and only `MAX_REALIGN` bounds it. Measured with the guard removed: a
-    /// self-transfer of 200 whole tokens took an under-mirrored holder from 128 shares to 256. That is a
-    /// free self-sync that bypasses the mint budget entirely.
+    /// backlog is eligible and only `MAX_REALIGN` bounds it. Without the guard, a self-transfer of 200
+    /// whole tokens takes an under-mirrored holder from 128 shares to 256: a free self-sync that bypasses
+    /// the mint budget entirely.
     ///
     /// The effect is bounded (a holder can only ever sync their own backlog, which `syncNFTs` already
     /// permits) so this is a correctness and consistency issue rather than a theft vector — but it means

@@ -55,7 +55,7 @@ either signs a transaction or makes a decision that cannot be undone.
 
 ### How much of this is just signing
 
-Counted from a real rehearsal, the whole launch is about **53 transactions**, and only **5 of them need
+Counted from a real rehearsal, the whole launch is about **54 transactions**, and only **5 of them need
 the deploy key**:
 
 | | transactions | key needed |
@@ -64,7 +64,7 @@ the deploy key**:
 | Renounce (§9) | 1 | **the same key** — nothing else can renounce |
 | Open the airdrop (§10b) | 1 | **the same key again**, hours later — nothing else can open it |
 | Batcher deploy (§11) | 1 | any funded wallet; the batcher is ownerless and grants nothing |
-| Airdrop push (§11) | ~47 | any funded wallet — **gas only** |
+| Airdrop push (§11) | 48 | any funded wallet — **gas only** |
 | Fee keeper (§10) | ongoing | a separate gas-only wallet |
 
 The push is the bulk of the volume and needs **no privilege at all**. `PrismAirdropBatcher` has no owner
@@ -190,15 +190,20 @@ forge --version && node --version          # Foundry, Node 18+
 export ETH_RPC_URL="<your mainnet endpoint>"
 export RPC_URL="$ETH_RPC_URL"
 forge build && forge test
+node --test test/launch-state.test.mjs test/push-plan.test.mjs   # wizard + airdrop push, offline
 ```
 
-**Expect:** all tests pass, 0 failed. If you see 14 failures mentioning `ETH_RPC_URL`, that variable
+**Expect:** all tests pass, 0 failed. If you see 19 failures mentioning `ETH_RPC_URL`, that variable
 is unset — it is not broken code.
 
-You also need a funded deployer key. Budget **≥ 9.1M gas** for the deploy plus the renounce, and fund
-well above the estimate: the deploy is three separate transactions and a reverted one does *not* stop the
-next, so running dry part-way is one of the few ways to half-deploy this. Prefer a keystore
-(`--account`) over a raw private key.
+The second command is worth the ten seconds if you intend to use `launch.mjs`: it checks the part that
+decides *which* step it offers you, including that a failed read is never mistaken for a finished launch.
+
+You also need a funded deployer key. Budget against your own dry run's estimate — about **9.6M gas** for the
+shipped configuration, because forge sets each transaction's gas limit at its estimate × 1.3 and the balance
+has to cover the limits rather than the gas actually used — plus the renounce, and fund well above that: the
+deploy is three separate transactions and a reverted one does *not* stop the next, so running dry part-way is
+one of the few ways to half-deploy this. Prefer a keystore (`--account`) over a raw private key.
 
 ---
 
@@ -249,7 +254,17 @@ confirmed on-chain.
 node merkle/make-env.mjs > .env
 ```
 
-Then set `RPC_URL` and `ETH_RPC_URL` in it to your own endpoint. That is the only value you supply.
+Then export your own endpoint in the shell — it is deliberately NOT in that file, because `source .env`
+overrides the environment and a blank line would clear what you had already set:
+
+```bash
+export RPC_URL="<your mainnet endpoint>"
+export ETH_RPC_URL="$RPC_URL"
+```
+
+Two statements, not one: a shell expands a whole line before assigning any of it, so
+`export RPC_URL=… ETH_RPC_URL="$RPC_URL"` leaves `ETH_RPC_URL` holding whatever it had before. That is the
+only value you supply.
 
 Everything else is filled in: the root, total and reserve come from the committed airdrop data; the seed
 price, tick, liquidity and floors are the fork-verified launch configuration; and `SALT_NONCE` is generated
@@ -305,8 +320,8 @@ forge script script/Deploy.s.sol --rpc-url "$RPC_URL" --sender <your deployer ad
 leaf verified against MERKLE_ROOT`, `pool opened at tick:` equal to your `SEED_TICK_UPPER`, and the seeded
 PRISM amount. With the `DEPLOY.md` §2 configuration that amount is **545322944111967924665 wei** — the
 entire remaining float bar **1000000004 wei** (0.000000001 PRISM) of deliberate rounding headroom, which is
-the same figure §7 tells you to expect. If you see the float consumed to the last wei instead, you are
-running an older configuration than this runbook documents.
+the same figure §7 tells you to expect. If you see the float consumed to the last wei instead, you are not
+running the configuration this runbook documents — regenerate `.env` with `make-env.mjs` before going on.
 
 Then confirm the predicted hook address is unoccupied:
 
@@ -325,7 +340,8 @@ Everything up to now is reversible. Nothing after this is. Before broadcasting, 
 - Step 3 printed `PREFLIGHT PASSED`.
 - Step 4's printed tick equals your intended `SEED_TICK_UPPER`, and the FDV is the valuation you mean.
 - `cast code` returned `0x`.
-- The deployer is funded well above 9.1M gas, and the base fee is low.
+- The deployer is funded well above the dry run's total estimate (~9.6M gas for this configuration), and
+  the base fee is low.
 - You have read `DEPLOY.md`'s opening warning and accept that this is three transactions, that its checks
   ran in simulation only, and that a mid-sequence failure must be finished by hand rather than re-run.
 
@@ -343,20 +359,25 @@ forge script script/Deploy.s.sol --rpc-url "$RPC_URL" \
 **Expect:** `ONCHAIN EXECUTION COMPLETE & SUCCESSFUL`, and the printed hook / mirror / vault / LP token
 id. Record all four.
 
-**If any step reverted:** finish the remaining steps by hand and stop to report. A re-run *will* now stop
+**If any step reverted:** finish the remaining steps by hand and stop to report. A re-run stops
 itself at the CREATE2 step — the vault is deployed deterministically, so every input to the hook's mined
 address is the same on a second run and it finds the hook already there. Treat that as a backstop rather
 than a plan.
 
-It is worth knowing this was not always so: while the vault was created with `new`, its address moved with
-the deployer's nonce, so a re-run mined a *different* hook address, the already-deployed check passed, and
-you ended up with a second complete 5,000 PRISM system while the first was orphaned along with any ETH
-already paid into its pool — the exact outcome this runbook told you a re-run would prevent.
+That backstop depends entirely on the vault address being a function of the configuration rather than of
+the deployer's nonce. If the vault were created with `new`, its address would move with the nonce, a re-run
+would mine a *different* hook address, the already-deployed check would pass, and you would end up with a
+second complete 5,000 PRISM system while the first was orphaned along with any ETH already paid into its
+pool. Do not change how the vault is deployed.
 
 **Before you renounce, whatever happened:** confirm the reserve is reachable — `cast code $VAULT` must be
-non-empty and `cast call $VAULT 'token()(address)'` must return the hook. `Renounce.s.sol` now enforces
-both on-chain in the same transaction that renounces, so it will refuse rather than let you seal a launch
-whose airdrop reserve was minted to an address that has no code.
+non-empty. `Renounce.s.sol` enforces that on-chain in the same transaction that renounces, so it will
+refuse rather than let you seal a launch whose airdrop reserve was minted to an address that has no code.
+
+`token()` must **not** be the hook yet. It is `0x0…0` at this point and that is correct: opening the
+airdrop is §10b, hours later, and doing it now is the one thing the split sequence exists to prevent. The
+script requires only that a vault which *is* already wired points at **this** hook — an unwired vault is a
+legitimate mid-launch state and is not a reason to delay renouncing.
 
 ---
 
@@ -372,7 +393,8 @@ cast call $VAULT 'token()(address)'                 --rpc-url "$RPC_URL"
 ```
 
 **Expect:** `seeded()` is **`true`**; `owner()` is still your deployer; `merkleRoot()` equals your
-`MERKLE_ROOT`; `token()` equals the hook address. The hook's own PRISM balance should be
+`MERKLE_ROOT`; `token()` is **`0x0…0`** — the airdrop is still closed, which is the point of §10b being a
+separate step. The hook's own PRISM balance should be
 **1000000004 wei** (0.000000001 PRISM) with the §2 configuration — deliberate rounding headroom, described
 in DEPLOY.md §2. Anything materially larger means you seeded less than you intended, and since whatever
 stays there is stranded permanently, understand it before renouncing.
@@ -403,9 +425,23 @@ an operator remembering to look.
 ## 9 · Renounce
 
 ```bash
+# Run from the repo root, with .env present — see below.
 HOOK=<hook> forge script script/Renounce.s.sol --rpc-url "$RPC_URL" \
   --sender <deployer> --account <keystore> --broadcast
 ```
+
+**Two checks here are silently skipped if the script cannot see your `.env`.** `MIN_SEED_LIQUIDITY` catches
+a seed that deposited too little, and `SEED_TICK_LOWER`/`SEED_TICK_UPPER` catch a seed placed over the wrong
+range — which the liquidity check alone cannot see, because the PRISM a mint consumes depends on the range
+as much as on the liquidity. Those are precisely the errors a hand-run `seed()` makes, so the recovery path
+is the one that needs them most.
+
+**Do not `source .env` to arm them.** Forge loads `.env` from the project root by itself, so running from
+the repo root is enough; and `source` does not export, so a sourced value is not something forge's own
+loader can see anyway. Sourcing also *overrides* your shell, so it would blank `RPC_URL` if your `.env` ever
+carried an empty one, and that takes out every command that needs an endpoint. **The reliable check is the
+output:** if the script prints a `NOTE: … SKIPPED` line, it did not have the variable. Read that rather than
+assuming silence means it checked.
 
 **Expect:** `Ownership renounced`, then `cast call $HOOK 'owner()(address)'` returns the zero address.
 The token is now final and immutable.
@@ -436,12 +472,18 @@ interval you intended (10–24 hours is the plan) so the float can actually trad
 
 Why this is a separate step at all: `PrismMigration.claim` refuses while the vault's `token` is unset, and
 is permissionless the moment it is set. So `setToken` is a single switch that opens the reserve to
-everyone at once — there is no per-holder gate and no way to open it gradually. It used to run inside the
-deploy, which meant the whole supply became movable in the same sequence that created the pool, one
-transaction *before* the pool even existed.
+everyone at once — there is no per-holder gate and no way to open it gradually. Run inside the deploy it
+would make the whole supply movable in the same sequence that creates the pool, one transaction *before*
+the pool exists; keeping it here is what buys the float its trading window.
 
 ```bash
-HOOK=$HOOK VAULT=$VAULT RESERVE=4454677055887032075331 \
+# Read the reserve from the chain rather than typing it. The script requires an exact match, and anyone
+# can add a wei to the vault with an ordinary transfer — reading it live absorbs that and also catches a
+# vault holding something other than what you expect.
+RESERVE=$(cast call $HOOK 'balanceOf(address)(uint256)' $VAULT --rpc-url "$RPC_URL" | cut -d' ' -f1)
+echo "$RESERVE"    # expect 4454677055887032075331 with the §2 configuration
+
+HOOK=$HOOK VAULT=$VAULT RESERVE=$RESERVE \
   forge script script/OpenAirdrop.s.sol --rpc-url "$RPC_URL" \
   --sender <deployer> --account <keystore> --broadcast
 ```
@@ -470,11 +512,16 @@ MIGRATION=$VAULT forge script script/DeployBatcher.s.sol --rpc-url "$RPC_URL" \
   --sender <deployer> --account <keystore> --broadcast
 
 cd merkle
+npm install          # REQUIRED here — the runner imports ethers, and node_modules is gitignored
 node push-airdrop.mjs --batcher <batcher> --rpc "$RPC_URL" --dry-run
 node push-airdrop.mjs --batcher <batcher> --rpc "$RPC_URL" --key $PK
 ```
 
-**Expect:** the dry run prints a transaction plan (~47 transactions for a 1,203-holder tree) with a gas
+The deploy itself needs no `npm install`, which is why §1 calls it optional — but everything in `merkle/`
+that talks to a chain (`push-airdrop.mjs`, `keeper.mjs`, `check-shares.mjs`) needs it, and without it each
+exits immediately with `ERR_MODULE_NOT_FOUND`.
+
+**Expect:** the dry run prints a transaction plan (48 transactions for the shipped 1,203-holder tree) with a gas
 estimate. The real run reports each batch. It is safe to interrupt and re-run: the vault records who has
 been paid, the batcher skips them, and nothing is double-sent.
 
@@ -506,8 +553,8 @@ wrap in a script.
 `--migration $VAULT` is what makes the unpaid answer exact: it reads the vault's own `claimed()` record.
 Without it the script can only infer from a zero balance, which is equally true of a holder who received
 their allocation and then sold — and 783 of the 1203 hold under one whole PRISM, so that is the likely case
-rather than the exotic one. (An unpaid holder also holds zero, and zero is trivially "fully mirrored",
-which is why this step used to hand out a clean bill of health over a push that stopped short.)
+rather than the exotic one. (An unpaid holder also holds zero, and zero is trivially "fully mirrored", so
+without `--migration` this step can report a clean bill of health over a push that stopped short.)
 
 For the published 1203-holder snapshot the mirroring gap is **5 addresses holding 288 unminted shares
 between them, 6.8% of the share base** — the other 1198 are fully mirrored by the push and need do nothing.

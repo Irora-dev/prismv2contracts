@@ -47,8 +47,12 @@ Two consequences worth knowing before you hold or integrate:
 ## Testing
 
 The suite covers unit behaviour, hardening cases, stateful invariant fuzzing (8 invariants × 500 runs
-× 30,000 calls), Halmos symbolic proofs of the core arithmetic (7), and end-to-end validation against
-mainnet's real Uniswap V4 contracts on a fork.
+× 30,000 calls), and end-to-end validation against mainnet's real Uniswap V4 contracts on a fork.
+
+There are also seven Halmos symbolic proofs of the core arithmetic. Read them narrowly: `SymbolicChecks`
+re-implements the expressions it reasons about rather than importing them, so they establish that the
+formulas are sound — no overflow, conservation holds, the fee split cannot lose value — and not
+that the contracts compute those formulas. The contract paths are covered by the tests and the fork runs.
 
 Every guard that defends an unrecoverable configuration mistake is **mutation-tested** — the guard is
 deliberately weakened to confirm a test actually fails, rather than trusting a green suite.
@@ -63,8 +67,10 @@ plain token. They are intentional and worth knowing before you integrate:
 - An ERC-20 approval also authorizes moving your fee-share NFTs (approving PRISM = approving its NFTs).
 - Ordinary trading mints/burns NFTs, so marketplace listings on a fee-share NFT can be invalidated.
 - `nftBalanceOf ≤ balanceOf/1e18` (a large single receive under-mirrors until you call `syncNFTs`).
-- A single **outflow** (transfer or sell) of more than **~2,500 whole tokens (~half the supply)**
-  in one transaction reverts out-of-gas; chunk it. Buys/receives are unaffected. (Measured in
+- A single **outflow** (transfer or sell) of more than **~529 whole tokens** in one transaction reverts
+  out-of-gas; chunk it. The binding limit is EIP-7825's per-transaction cap of 2^24 = 16,777,216 gas, not
+  the block gas limit: moving a whole token's fee-share costs ~31,668 gas once the fee accumulators are
+  non-zero, which in production they always are. Buys/receives are unaffected. (Measured in
   `test/GasCeiling.t.sol`.)
 - **Fees are booked when they are collected, so collect them often.** A v4 swap runs inside
   `PoolManager.unlock`, and `_maybePoke` deliberately returns early while the manager is unlocked, since
@@ -77,12 +83,16 @@ plain token. They are intentional and worth knowing before you integrate:
 ## Quick start
 
 ```bash
-# Twelve of the test suites fork mainnet and read this directly, so `forge test` reports 14 failures
+# Seventeen test files fork mainnet and read this directly, so `forge test` reports 19 failures
 # without it. That is a missing variable, not broken code. `--fork-url` does NOT substitute for it.
 export ETH_RPC_URL="<your mainnet endpoint>"
 
 forge build
 forge test                       # everything, including the mainnet-fork suites
+
+# The launch wizard's state detection, which decides which of the five signatures to offer you. Node
+# builtins only, no network and no chain: it runs launch.mjs against stub `cast`/`forge` binaries.
+node --test test/launch-state.test.mjs test/push-plan.test.mjs
 # Symbolic proofs (pip install halmos). The longer solver budget is REQUIRED, not optional —
 # check_feeSplitConservationAndNoOverflow times out at the default and passes at 120s.
 halmos --match-contract SymbolicChecks --solver-timeout-assertion 120000

@@ -81,8 +81,8 @@ let addresses;
 if (one) {
   addresses = [one];
   // Load the allocations here too, best-effort. Without them the unpaid check below cannot fire, so a
-  // single-holder run would report an unpaid holder as "fully mirrored" — the exact defect this check
-  // exists to close, left in place on the one path a worried holder is most likely to use. Best-effort
+  // single-holder run would report an unpaid holder as "fully mirrored" — exactly what this check exists
+  // to prevent, on the one path a worried holder is most likely to use. Best-effort
   // because checking an address that is not in the tree at all is legitimate.
   try { loadClaims(); } catch { /* no claims file: fall through to the mirroring check only */ }
 } else {
@@ -185,9 +185,9 @@ console.log("`syncNFTs(0)` means \"mint as many as fit in this transaction\". A 
 console.log("short needs to call it more than once — it is capped per transaction for the same gas reason");
 console.log("the shortfall exists. Re-run this script to confirm the gap closed.");
 
-// Decide the exit code HERE, at the end of every path. It used to sit inside the `gapped.length === 0`
-// branch, which made it dead in the state the launch actually produces: the shipped snapshot leaves 5
-// holders under-mirrored by design, so the script always reached the report above and exited 0 — with any
-// unpaid holders printed further up. A human reading the output was never misled; a wrapper or CI step
-// checking the exit code was.
+// Decide the exit code HERE, at the end of every path — not inside the `gapped.length === 0` branch,
+// which is unreachable in the state the launch actually produces: the shipped snapshot leaves 5 holders
+// under-mirrored by design, so this script always reaches the report above. An exit code decided in that
+// branch would be 0 with unpaid holders printed further up: readable to a human, invisible to a wrapper
+// or CI step that checks the code.
 process.exit(unpaid.length > 0 ? 1 : 0);

@@ -3,15 +3,15 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 
-/// AUDIT ROUND 2 — CONTRACTS. `_withdrawPendingTo` (PrismHookV2.sol:818-843) makes an ALL-GAS ETH
+/// `_withdrawPendingTo` (PrismHookV2.sol:818-843) makes an ALL-GAS ETH
 /// call to an arbitrary recipient. Prior rounds proved the GUARDED entry points (`claim`,
 /// `withdrawPending`, `syncNFTs`) revert re-entrantly. This file attacks what is NOT guarded and is
 /// reachable from that same window: the ERC-20 surface (`transfer` / `transferFrom` / `approve`) and
 /// `pokeFees()` itself — all of which re-enter the fee layer through `_afterTokenTransfer` ->
 /// `_maybePoke` -> `pokeFees` -> `_mintCapped`.
 ///
-/// It also settles the `pendingETH` restore line with tests that DISCRIMINATE, which the previously
-/// reported (and reverted) finding on that line did not: the success path must KEEP credit created
+/// It also settles the `pendingETH` restore line with tests that DISCRIMINATE — a weaker pair of tests
+/// passes under either `=` or `+=` and settles nothing: the success path must KEEP credit created
 /// mid-flight, and the failure path must show the credit actually rolled back.
 
 interface IHook {
@@ -187,7 +187,7 @@ contract WithdrawReentryUnit is Test {
     /// The guarded surface is shut during the all-gas send; the UNGUARDED surface is open and gains
     /// nothing. The recipient is paid exactly what the caller was owed — not a wei more — and every
     /// other holder's entitlement survives intact.
-    function test_R2C_hostileRecipientChurningUnguardedSurfaceGainsNothing() public {
+    function test_hostileRecipientChurningUnguardedSurfaceGainsNothing() public {
         _claimAll(address(holder));
         uint256 owed = hook.pendingETH(address(holder));
         assertEq(owed, 20 * (accRound1 / ACC), "holder's slice is wrong");
@@ -229,7 +229,7 @@ contract WithdrawReentryUnit is Test {
     /// then returns normally. `ok` is true, so no restore runs and the new credit MUST survive.
     /// If the restore were unconditional (or an `=` on the success path), the caller would end with
     /// the OLD amount instead — a different, checkable number.
-    function test_R2C_creditCreatedDuringASuccessfulSendSurvives() public {
+    function test_creditCreatedDuringASuccessfulSendSurvives() public {
         _claimAll(address(holder));
         uint256 owed = hook.pendingETH(address(holder));
         assertGt(owed, 0);
@@ -254,7 +254,7 @@ contract WithdrawReentryUnit is Test {
     /// and (b) the mid-flight effects are provably gone — the shares it would have advanced still
     /// carry their unrealized accrual, and the hook's ETH never moved. This is what makes `=` and
     /// `+=` indistinguishable on that line, rather than merely untested.
-    function test_R2C_failedSendRestoresExactlyAndRollsBackMidFlightEffects() public {
+    function test_failedSendRestoresExactlyAndRollsBackMidFlightEffects() public {
         _claimAll(address(holder));
         uint256 owed = hook.pendingETH(address(holder));
         assertGt(owed, 0);
@@ -287,7 +287,7 @@ contract WithdrawReentryUnit is Test {
 
     /// A recipient that rejects ETH outright leaves the credit intact and fully recoverable by a
     /// retry to a different address — the failure does not revert the call and does not strand value.
-    function test_R2C_ethRejectorKeepsCreditAndItStaysRecoverable() public {
+    function test_ethRejectorKeepsCreditAndItStaysRecoverable() public {
         _claimAll(address(holder));
         uint256 owedETH = hook.pendingETH(address(holder));
         assertGt(owedETH, 0);
@@ -305,7 +305,7 @@ contract WithdrawReentryUnit is Test {
 
     /// `withdrawPendingTo` refuses every excluded sink, so a holder cannot route its own fees
     /// somewhere unrecoverable — including the two v2 added (Permit2, the mirror) and the burn sink.
-    function test_R2C_withdrawPendingToRejectsEverySink() public {
+    function test_withdrawPendingToRejectsEverySink() public {
         _claimAll(address(holder));
         assertGt(hook.pendingETH(address(holder)), 0);
         address[7] memory bad = [HOOKA, address(pm), address(posm), address(p2),

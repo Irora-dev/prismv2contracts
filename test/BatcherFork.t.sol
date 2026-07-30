@@ -150,7 +150,7 @@ contract BatcherFork is Test {
     }
 
     /// A permanently-invalid row must be counted and skipped, never stranding the rows behind it —
-    /// and it must NOT be reported as `alreadyClaimed`, which is what previously hid unpaid holders.
+    /// and it must NOT be reported as `alreadyClaimed`, which is the bucket that hides unpaid holders.
     function test_BadRowDoesNotPoisonTheBatch() public {
         uint256[] memory bad = amounts;
         bad[3] = amounts[3] + 1; // wrong amount -> different leaf -> proof fails deterministically
@@ -186,12 +186,12 @@ contract BatcherFork is Test {
         assertEq(batcher.pendingCount(accounts), 0, "list fully settled");
     }
 
-    /// Regression: an out-of-gas row must never be reported as walked-past.
+    /// An out-of-gas row must never be reported as walked-past.
     ///
-    /// Previously the `catch` counted OOG in the same bucket as "already paid" and let `++i` advance,
-    /// so `push` could return `stoppedAt == accounts.length` — "list complete" — while a holder held
-    /// nothing, with no revert and nothing to distinguish it from a settled row. A caller following
-    /// the documented resume protocol lost that holder permanently and silently.
+    /// If the `catch` counted OOG in the same bucket as "already paid" and let `++i` advance, `push`
+    /// could return `stoppedAt == accounts.length` — "list complete" — while a holder held nothing, with
+    /// no revert and nothing to distinguish it from a settled row, and a caller following the documented
+    /// resume protocol would lose that holder permanently and silently.
     function test_OutOfGasRowStopsAndIsNeverReportedAsSettled() public {
         // Starve the call: enough gas to clear the floor and enter row 0, not enough to finish it.
         // Row 0 is the 18-PRISM holder, so its mints cost far more than the floor.

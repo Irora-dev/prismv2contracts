@@ -114,7 +114,7 @@ contract FixUnit is Test {
         assertEq(hook.totalShares(), 3, "totalShares fell to 3 == eligible whole tokens");
     }
 
-    // ─────────── regression: the guard is NARROW (no legitimate flow broken) ───────────
+    // ─────────── the guard is NARROW (no legitimate flow broken) ───────────
 
     /// The guard blocks only excluded addresses. A normal contract recipient — including the
     /// ERC-721 safeTransfer receiver-callback path a marketplace uses — still works.

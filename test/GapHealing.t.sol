@@ -22,14 +22,14 @@ contract POSMStub {
 
 /// Does an ordinary inflow close an existing under-mirroring gap, or freeze it?
 ///
-/// This is the property that decides whether the `mintRoom` clamp is a fix or a regression, so it is
+/// This is the property that decides whether the `mintRoom` clamp helps or harms, so it is
 /// pinned independently of any comment. `MAX_REALIGN = 128` guarantees a gap for anybody who receives
 /// more than 128 whole tokens in one transfer, and `syncNFTs` is caller-only — so if inflows stop healing
 /// it, a holder who never learns about `syncNFTs` is underpaid on every fee round, permanently.
 ///
 /// The realistic shape is a routed buy: value reaches the holder from another *user* address (a router),
 /// which is the `_realignPair` path. A transfer straight from an excluded address takes `_realignSolo`
-/// instead, which is not affected — so testing only the excluded-sender path would have missed this.
+/// instead, which is not affected — so the excluded-sender path alone does not test this at all.
 contract GapHealing is Test {
     address constant V2 = address(0x2040);
     address constant OWNER = address(0xB0B);
@@ -67,9 +67,9 @@ contract GapHealing is Test {
         console2.log("gap at start:", entitled0 - shares0);
         console2.log("shares gained for 10 whole tokens received:", shares1 - shares0);
 
-        // THE REGRESSION GUARD. Inflows must close the pre-existing gap, not merely keep pace with the
-        // new tokens. A clamp of `mintBudget - transferable` froze it and was reverted; if this assertion
-        // fails, that regression is back and holders who never call `syncNFTs` are being underpaid.
+        // THE GUARD. Inflows must close the pre-existing gap, not merely keep pace with the new tokens.
+        // A clamp of `mintBudget - transferable` freezes it; if this assertion fails, the clamp is charging
+        // the mint that way and holders who never call `syncNFTs` are being underpaid.
         assertLt(gap1, entitled0 - shares0, "an ordinary inflow must SHRINK the pre-existing gap");
         assertEq(shares1 - shares0, 20, "10 whole tokens in: 10 moved from the router + 10 gap-healing mints");
 

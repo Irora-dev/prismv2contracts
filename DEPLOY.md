@@ -3,7 +3,8 @@
 > The contract is **immutable and unrecoverable** once deployed. Do a dry run and double-check every
 > number before you broadcast.
 >
-> **The deploy is THREE transactions, not one** (two if you launch with no airdrop). `forge script` emits one transaction
+> **The deploy is THREE transactions, not one** (two if you launch with no airdrop). It is not atomic, and
+> a bad check does not revert the whole thing. `forge script` emits one transaction
 > per state-changing call on sequential nonces, and the script's `require`s run only during local
 > simulation — the script contract is never deployed on-chain. Simulation *does* reliably catch every
 > deterministic configuration mistake before anything is signed, which is what those checks are for.
@@ -26,8 +27,8 @@
   required). Prefer a hardware wallet (`--ledger` / `--trezor`, which asks you to confirm on the device) or
   an encrypted keystore (`--account`, which prompts for a password) — never a raw `--private-key`. See
   LAUNCH.md's "How signing actually works" for which of those an agent may run on your behalf.
-- **`export ETH_RPC_URL=<your mainnet endpoint>`** before running the suite. Twelve test suites fork
-  mainnet and read that variable directly, so without it `forge test` reports 14 failures with
+- **`export ETH_RPC_URL=<your mainnet endpoint>`** before running the suite. Seventeen test files fork
+  mainnet and read that variable directly, so without it `forge test` reports 19 failures with
   `environment variable "ETH_RPC_URL" not found` — which looks like broken code and is not.
 - `forge build && forge test` pass locally.
 
@@ -140,11 +141,10 @@ the 20% PRISM-side fee burn on every trade, verifiable on-chain and requiring no
 
 > ⚠️ **Do not raise `SEED_LIQUIDITY` by hand, and re-run the dry run if you change any of these numbers.**
 >
-> An earlier version of this configuration sized the liquidity to consume the float to the last wei. It
-> worked — verified at three blocks and at the chain head — but with **zero** slack: POSM rounds its
-> requirement up, and the ceiling landed exactly on the balance. Measured with `SEED_LIQUIDITY` incremented
-> by just 1, the deploy aborts with **`TRANSFER_FROM_FAILED`** raised inside Permit2, which says nothing
-> about liquidity or balances. The current value leaves 1e9 wei of headroom so that edge is nowhere near.
+> Sizing the liquidity to consume the float to the last wei works, but with **zero** slack: POSM rounds its
+> requirement up, so the ceiling lands exactly on the balance. One wei of `SEED_LIQUIDITY` above what the
+> hook can cover aborts the deploy with **`TRANSFER_FROM_FAILED`** raised inside Permit2, which says nothing
+> about liquidity or balances. The value above leaves 1e9 wei of headroom so that edge is nowhere near.
 >
 > Note the arithmetic is **structural**: the deposit depends only on `SEED_LIQUIDITY`, the two ticks and the
 > reserve — all fixed constants. Pool state, block number and market conditions never enter it, so a
@@ -167,9 +167,9 @@ discarded by the guard it appears to set.
 Two cross-checks in `make-env.mjs` exist because the on-chain guards cannot catch these on their own:
 
 * It emits `MIN_SEED_PRISM` as **the seed it actually intends**, not as the 90%-of-float floor. Emitting the
-  floor made the knob inert — `validateSeededAmount` takes `max(env, 90%)` — so a mistakenly lowered
+  floor would leave the knob inert — `validateSeededAmount` takes `max(env, 90%)` — so a mistakenly lowered
   `SEED_LIQUIDITY` could strand up to **54.53 PRISM** in a hook that is excluded from fee shares and, after
-  renouncing, has no path back out. The bar now sits a microtoken below the whole float.
+  renouncing, has no path back out. The bar sits a microtoken below the whole float instead.
 * It states the launch valuation **twice**: once as `LAUNCH_TICK`, once by hand as `LAUNCH_FDV_ETH`, and
   refuses to emit if they disagree by more than 5%. `Deploy.s.sol`'s ±25% FDV band exists so the operator
   must declare the valuation they intend, but that band is vacuous when `TARGET_FDV_WEI` is derived from the
@@ -191,8 +191,8 @@ For reference, the `76600` value corresponds to **2,120.9 PRISM/ETH — a 2.36 E
 for the whole 5,000 supply. If that is not what you intended, do not use it.
 
 **`SEED_TICK_LOWER` is your depth.** Use `-887200` for a full curve. A narrow range concentrates the
-entire float into a few ticks: measured, `[76400, 76600]` with a large liquidity value let **one buyer
-take 99.9% of the supply for 2.4 ETH**, and every check passed.
+entire float into a few ticks: with `[76400, 76600]` and a large liquidity value, **one buyer can take
+99.9% of the supply for 2.4 ETH** while every check passes.
 
 **`SEED_LIQUIDITY` sets how much PRISM actually goes in**, and too little is unrecoverable. It must
 require **≤ `5000 − MIGRATION_AMOUNT/1e18` PRISM**, and it should require nearly all of it. The PRISM consumed is
@@ -201,24 +201,24 @@ it is ~46, but at the ticks you should actually use it is far lower: **22.2 at t
 39000, **9.392 at 44800**, 6.6187 at 37800, 6.5529 at 37600, 2.2255 at 16000**. Sizing from "46"
 under-seeds by up to 20x.
 (At tick 37600, `SEED_LIQUIDITY=80951486627637257491` consumes 530.466098383219207988 PRISM,
-fork-measured — leaving 14.856846112967924669 PRISM behind, NOT "within 10 wei of the float" as an earlier
-version of this line claimed. The §2 configuration seeds the whole float instead and strands nothing; use
-`merkle/seed-params.mjs` for a liquidity value matching whatever you actually intend.) Whatever you
+fork-measured, which leaves 14.856846112967924669 PRISM behind rather than the whole float. The §2
+configuration seeds the whole float instead and strands nothing; use `merkle/seed-params.mjs` for a
+liquidity value matching whatever you actually intend.) Whatever you
 leave in the hook is stranded there forever, and if the seeded float is under one whole PRISM,
 `totalShares` can never leave zero — which means `pokeFees` returns early forever and **every fee the
-pool ever earns becomes unclaimable.** The script now enforces `MIN_SEED_PRISM` (default: 90% of the
+pool ever earns becomes unclaimable.** The script enforces `MIN_SEED_PRISM` (default: 90% of the
 float) so this cannot pass silently. That check is **upward-only**: a `MIN_SEED_PRISM` below 90% of the
-float is ignored, because as a downward override it was worse than having no check at all — `0` allowed
-99.98% of supply to strand and still deploy. There is also an absolute floor of 50 PRISM, because a
+float is ignored, because honouring it downward would be worse than having no check at all — a `0` would
+let almost the whole supply strand and still deploy. There is also an absolute floor of 50 PRISM, because a
 share needs a *whole* token and a ~1-PRISM pool yields buyers zero whole tokens after price impact.
 
 **Every one of these is silently truncated** if you add a digit — `SEED_LIQUIDITY` to `uint128`, the
 ticks to `int24`, the price to `uint160`. A tick of `16777416` becomes `200`, a ~2,000,000× price error
-that deploys cleanly. The script now round-trips each value and refuses a truncated one, but count the
+that deploys cleanly. The script round-trips each value and refuses a truncated one, but count the
 digits yourself as well.
 
 **Expect to be sniped.** The pool is live the moment the seed transaction lands, and `seed`'s calldata
-is public in the mempool beforehand. With the reference `L=1e18`, a single 1 ETH buy took 97.85% of the
+is public in the mempool beforehand. With the reference `L=1e18`, a single 1 ETH buy takes 97.85% of the
 float and 100% of the fee shares. Seed depth is the only defence, because fee shares are proportional
 to whole tokens held — a thin seed sells a permanent claim on protocol revenue for pocket change.
 
@@ -226,13 +226,27 @@ to whole tokens held — a thin seed sells a permanent claim on protocol revenue
 ```bash
 cp .env.example .env    # then fill in every field
 ```
-Fill: `RPC_URL`, `MERKLE_ROOT`, `MERKLE_TOTAL`, `MIGRATION_AMOUNT`, `SEED_SQRT_PRICE_X96`,
+Fill: `MERKLE_ROOT`, `MERKLE_TOTAL`, `MIGRATION_AMOUNT`, `SEED_SQRT_PRICE_X96`,
 `SEED_TICK_LOWER`, `SEED_TICK_UPPER`, `SEED_LIQUIDITY`, **`TARGET_FDV_WEI`** (the valuation you intend,
 checked against the price within 25%) and **`SALT_NONCE`** (a random secret — a nonce of 0 makes the
-deploy address publicly derivable and squattable, which was demonstrated end to end).
+deploy address publicly derivable and squattable).
+
+**Export your endpoint in the shell, not in `.env`** — as two separate statements, because a shell expands
+a whole line before assigning any of it, so `export RPC_URL=… ETH_RPC_URL="$RPC_URL"` leaves `ETH_RPC_URL`
+holding whatever it had before (empty, or a stale endpoint that forks the wrong chain and still reports a
+result):
+
+```bash
+export RPC_URL="<your mainnet endpoint>"
+export ETH_RPC_URL="$RPC_URL"
+```
+
+`source .env` overrides the environment, so an `RPC_URL=` line in that file would clear what you just set,
+and the step it takes out is the dry run below.
 
 ## 4. Dry run (simulate — no broadcast)
 ```bash
+export RPC_URL="<your mainnet endpoint>"   # if it is not already exported
 source .env
 forge script script/Deploy.s.sol --rpc-url "$RPC_URL" --sender <your deployer address>
 ```
@@ -269,14 +283,18 @@ reserve distributable — `claim` refuses while it is unset and is permissionles
 separate step (`script/OpenAirdrop.s.sol`, §6b) run once the pool has had time to trade. Note the
 consequence: the deploy key is needed again for that step, *after* the renounce.
 
-Ownership is deliberately **still held** at this point. Total measured cost: **9,087,021 gas** across the
-three transactions, from a full mainnet-fork dry run of the configuration in §2, plus a separate ~24,000 gas
-for the renounce. About **0.045 ETH at 5 gwei** or 0.27 ETH at 30 gwei.
+Ownership is deliberately **still held** at this point. Budget against what the deployer's *balance* has to
+cover, which is not the gas the deploy consumes: `forge script` sets each transaction's `gasLimit` to its own
+estimate times the default **1.3x** multiplier, and a node rejects a transaction whose
+`gasLimit × maxFeePerGas` exceeds the sender's balance. For the §2 configuration a dry run estimates about
+**9.6M gas** across the three transactions on that basis, against roughly 6.6M actually consumed, plus a
+separate ~24,000 for the renounce — so about **0.05 ETH at 5 gwei** or 0.29 ETH at 30 gwei has to be
+*available*, whatever ends up spent.
 
-An earlier figure of 6,619,259 here understated it by 37%; it predated the config guards and the
-CREATE2 salt search. **Fund against 9.1M plus margin, and re-read your own dry run's estimate rather than
-this number** — it is the one place where being optimistic can half-deploy the token, since a reverted
-transaction does not stop the next.
+**Fund against your own dry run's estimate, plus margin — not against a figure in this document, and not
+against the gas the deploy actually burns.** This is the one place where being optimistic can half-deploy the
+token, since a reverted transaction does not stop the next: funded at only the consumed figure, the first two
+transactions fit and `seed()` does not.
 
 Record the printed **PrismHookV2**, **PrismMirror**, and **PrismMigration** addresses.
 
@@ -293,8 +311,11 @@ Check all of this **before** giving up ownership, because renouncing is the poin
 - The pool's current tick equals `SEED_TICK_UPPER` (not some higher phantom value), and
   `globalTickLower`/`globalTickUpper` are the range you intended.
 - `totalShares()` == 0 (nobody has bought yet), the LP position's liquidity > 0.
-- `migration.token()` == the hook, `balanceOf(migration)` == `MIGRATION_AMOUNT`,
-  `nftBalanceOf(migration)` == 0, and `migration.merkleRoot()` == the root printed by `generate.mjs`.
+- `migration.token()` == `address(0)` — the airdrop is opened later, by `script/OpenAirdrop.s.sol`, so
+  an unwired vault is correct here and wiring it now would defeat that sequencing. `Renounce.s.sol`
+  requires only that a vault which is *already* wired points at this hook.
+- `balanceOf(migration)` == `MIGRATION_AMOUNT`, `nftBalanceOf(migration)` == 0, and
+  `migration.merkleRoot()` == the root printed by `generate.mjs`.
 - Verify one real holder's `(account, amount, proof)` from `merkle/out/claims.json` against the
   deployed root. A wrong root locks the reserve forever and nothing else detects it.
 
@@ -341,9 +362,9 @@ so **anyone** can run this — the distribution does not depend on you staying i
 
 Cost scales with the *amount* delivered, not the holder count, because the mirror mints one fee-share
 NFT per whole PRISM. Each mint costs **~76k gas** in production — two virgin `_setFeeDebt` slots at
-20,000 each, not the ~100 they cost on a pool that has never collected a fee, which is why an earlier
-figure of ~37k understated this by 2x. Measured: a dust holder ~61k gas, a mint-capped holder ~10M.
-For a ~1,200-holder / 4,455-PRISM list that is **~419M gas across ~47 transactions** — roughly 0.11 ETH
+20,000 each, not the ~100 they cost on a pool that has never collected a fee, so a figure measured
+before any fee has accrued understates production by ~2x. Measured: a dust holder ~61k gas, a mint-capped holder ~10M.
+For a ~1,200-holder / 4,455-PRISM list that is **424M gas across 48 transactions** — roughly 0.11 ETH
 at 0.26 gwei but **~2.1 ETH at 5 gwei**, so watch the gas price. `--dry-run` prints the live estimate,
 and it is accurate to well under 1% against real execution.
 
@@ -352,7 +373,7 @@ Useful details:
   the same command as often as you like — nothing double-sends. If a run delivers nothing at all, the
   script says so rather than telling you to retry, because that means the proofs do not match the
   deployed root and retrying cannot help.
-- **`--min-prism 1`** skips holders below one whole PRISM. On the corrected snapshot that is 783
+- **`--min-prism 1`** skips holders below one whole PRISM. On the published snapshot that is 783
   holders whose allocations are worth less than the gas to deliver them; skipping saves ~52M gas and
   they can still claim normally. The closing verification always checks the **full** list, so it can
   never report "all paid" about a filtered subset.
@@ -393,10 +414,12 @@ deploys *successfully* and cannot be undone.
 7. The PRISM the seed will consume (`L × 1.0001^(tickUpper/2)`) is nearly all of
    `5000 − MIGRATION_AMOUNT/1e18`. Whatever you leave behind is locked forever.
 8. Dry run with `--sender`, then `cast code` the printed hook address on mainnet — it must be empty.
-9. Deployer funded for **≥ 9.1M gas across the three transactions** (a full fork dry-run of the planned
-    config measured 9,087,021), **plus the separate renounce transaction**, plus margin. Fund for well
-    over the estimate: because a reverted transaction does not stop the next, running out of gas
-    part-way through is one of the few ways to half-deploy this. Broadcast at a low base fee.
+9. Deployer funded for **at least the total gas your own dry run estimates** across the three
+    transactions — about 9.6M for the §2 configuration, because forge sizes each `gasLimit` at its own
+    estimate × 1.3 and the balance must cover the limits, not the ~6.6M actually consumed — **plus the
+    separate renounce transaction**, plus margin. Because a reverted transaction does not stop the next,
+    running out of gas part-way through is one of the few ways to half-deploy this. Broadcast at a low
+    base fee.
 10. Broadcast with `--slow`, and understand you are signing three transactions whose `require`s do not
     run on-chain.
 11. Verify §6 in full — **especially `seeded()`** — before running `Renounce.s.sol`.

@@ -6,21 +6,20 @@ import {Deploy} from "../script/Deploy.s.sol";
 import {PrismMigration} from "../src/PrismMigration.sol";
 
 /// The vault is deployed through the canonical CREATE2 factory so its address does not depend on the
-/// deployer's nonce. That introduced a critical bug, and this file exists so it can never return.
+/// deployer's nonce. This file pins the one thing that combination can get wrong.
 ///
-/// `PrismMigration` used to take its `deployer` from `msg.sender`. Deployed through the factory, the
+/// `PrismMigration` must NOT take its `deployer` from `msg.sender`. Deployed through the factory, the
 /// factory IS `msg.sender` — and the factory's 69-byte runtime contains `CREATE2` and `RETURN` and no CALL
-/// opcode of any kind, so `msg.sender == factory` is unreachable on a call. `setToken` was therefore
-/// permanently uncallable by anyone: the deploy aborted in simulation (fail-safe), but the documented
-/// hand-recovery path would have minted 4454.677 PRISM — 89% of supply — into a vault that could never be
-/// wired to a token and has no sweep, and the renounce guard would then have refused forever, leaving a
-/// live owner key. `deployer` is now an explicit constructor argument.
+/// opcode of any kind, so `msg.sender == factory` is unreachable on a call. `setToken` would therefore be
+/// permanently uncallable by anyone: the deploy aborts in simulation (fail-safe), but the documented
+/// hand-recovery path would mint 4454.677 PRISM — 89% of supply — into a vault that could never be wired
+/// to a token and has no sweep, and the renounce guard would then refuse forever, leaving a live owner
+/// key. `deployer` is an explicit constructor argument for that reason.
 ///
-/// Why this went unnoticed for a whole commit: nothing called `setToken` on a CREATE2-deployed vault.
-/// `DeployFork` hand-rolls a launch with NO airdrop, so it constructs no vault at all; every other test
-/// builds one with `new` from the test contract, which makes the test the deployer and works fine; and the
-/// recovery test in `VaultDeterminismFork.t.sol` asserted `token() == address(0)`, which is true of a
-/// fresh vault whether or not it can ever be wired. An assertion that cannot fail is not a test.
+/// Nothing else covers it: `DeployFork` hand-rolls a launch with NO airdrop, so it constructs no vault at
+/// all; every other test builds one with `new` from the test contract, which makes the test the deployer
+/// and works fine; and a recovery test that asserts `token() == address(0)` is true of a fresh vault
+/// whether or not it can ever be wired. An assertion that cannot fail is not a test.
 contract VaultDeployerFork is Test {
     uint256 constant FORK_BLOCK = 25604624;
     address  constant FACTORY   = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
@@ -35,7 +34,7 @@ contract VaultDeployerFork is Test {
     }
 
     /// The launch key — not the factory — is the vault's deployer, and it can actually wire the token.
-    /// This is the assertion whose absence let the bug ship.
+    /// This is the assertion the whole arrangement rests on.
     function test_TheLaunchKeyCanWireAFactoryDeployedVault() public {
         address owner = address(this);
         address vault = d.deployVaultIfAbsent(owner, ROOT, NONCE);

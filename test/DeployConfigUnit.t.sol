@@ -4,13 +4,13 @@ pragma solidity ^0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {Deploy} from "../script/Deploy.s.sol";
 
-/// Regression tests for `Deploy.s.sol`'s configuration guards.
+/// Tests for `Deploy.s.sol`'s configuration guards.
 ///
 /// Every guard here defends a mistake that deploys CLEANLY and bricks an immutable contract forever, so
-/// each one needs a test that fails if the guard weakens. The critical word is *shares code*: an earlier
-/// version of this coverage replayed the guard sequence inline in the test file, and mutation testing
-/// showed that was worthless — reverting a real guard in the script left the entire suite green. These
-/// call `Deploy`'s own `public pure` validators, so a change to the script fails here.
+/// each one needs a test that fails if the guard weakens. The load-bearing words are *shares code*: a test
+/// that replays the guard sequence inline instead of calling it proves nothing, because reverting the real
+/// guard in the script leaves such a test green. These call `Deploy`'s own `public pure` validators, so a
+/// change to the script fails here.
 ///
 /// Not env-driven on purpose: `vm.setEnv` is process-global and forge runs a contract's tests in
 /// PARALLEL, so env-driven config tests race and flake.
@@ -68,18 +68,18 @@ contract DeployConfigUnit is Test {
         // The documented implied FDV, to the wei.
         assertEq(d.impliedFdvWei(SHIP_SQRT_PRICE), 56679759771485417094);
         // And the shipped MIN_SEED_PRISM must actually RAISE the bar. `validateSeededAmount` takes
-        // max(env, 90% of float), so emitting the 90% floor itself — which the generator used to do —
-        // left the knob inert and up to 10% of the float (54.53 PRISM) strandable in a hook that is
-        // excluded from fee shares and, once renounced, has no path back out.
+        // max(env, 90% of float), so a generator that emitted the 90% floor itself would leave the knob
+        // inert and up to 10% of the float (54.53 PRISM) strandable in a hook that is excluded from fee
+        // shares and, once renounced, has no path back out.
         uint256 float_ = 5000 ether - TREE_TOTAL;
         assertGt(SHIP_MIN_SEED, (float_ * 90) / 100, "MIN_SEED_PRISM must raise the bar, not restate it");
 
         // DERIVE it rather than trusting the constant above, with the same formula `make-env.mjs` uses:
-        // ceil(L * (sqrtUpper - sqrtLower) / 2^96) - 1e12. A hand-copied constant here has gone stale
-        // TWICE — once when the seed headroom changed, once when a one-wei ceiling bug was fixed in the
-        // generator — and both times every guard still passed, because `validateConfig` never
-        // discriminates on this value. Tying it to the arithmetic makes drift a test failure instead of a
-        // silent disagreement between the repo and the config an operator actually pastes.
+        // ceil(L * (sqrtUpper - sqrtLower) / 2^96) - 1e12. A hand-copied constant here goes stale whenever
+        // the seed headroom or the generator's arithmetic moves, and every guard still passes when it does,
+        // because `validateConfig` never discriminates on this value. Tying it to the arithmetic makes
+        // drift a test failure instead of a silent disagreement between the repo and the config an operator
+        // actually pastes.
         uint256 sqrtLower = 4310618292;              // TickMath.getSqrtPriceAtTick(-887200)
         uint256 numerator = uint256(SHIP_LIQUIDITY) * (SHIP_SQRT_PRICE - sqrtLower);
         uint256 deposit   = numerator / (1 << 96) + (numerator % (1 << 96) == 0 ? 0 : 1);  // ceiling, as v4 charges
@@ -88,18 +88,18 @@ contract DeployConfigUnit is Test {
         assertEq(float_ - deposit, 1000000004, "seed headroom is not the documented residual");
     }
 
-    /// The point of the raised bar: the 90%-of-float seed that used to deploy cleanly, stranding 54.53
-    /// PRISM forever, is now rejected in simulation.
+    /// The point of the raised bar: a seed of exactly 90% of the float — which strands 54.53 PRISM forever
+    /// — must be rejected in simulation rather than deploying cleanly.
     function test_UnderSeedingTheFloatNowReverts() public {
         uint256 float_ = 5000 ether - TREE_TOTAL;
         uint256 ninetyPct = (float_ * 90) / 100;
-        // Sanity: this is exactly what the old generator emitted, and what it used to permit.
+        // Sanity: this is the bare 90%-of-float figure that the raised bar has to reject.
         assertEq(ninetyPct, 490790649701671132202);
         vm.expectRevert(bytes("seeded PRISM below 90% of the float"));
         d.validateSeededAmount(float_, ninetyPct, SHIP_MIN_SEED);
         // And the shipped seed itself still passes.
         d.validateSeededAmount(float_, SHIP_MIN_SEED, SHIP_MIN_SEED);
-        emit log_named_uint("PRISM no longer strandable (wei)", float_ - ninetyPct);
+        emit log_named_uint("PRISM the raised bar keeps unstrandable (wei)", float_ - ninetyPct);
     }
 
     function test_TheRealConfigPasses() public view {
@@ -251,10 +251,10 @@ contract DeployConfigUnit is Test {
         d.validateConfig(c);
     }
 
-    /// The hole the relative band could never close, found by re-auditing the fix that claimed to close
-    /// it. `impliedFdvWei` floors to 0 above sqrtPrice ~5.6e39, which covers 1,938 aligned in-range ticks,
+    /// The hole a purely relative band cannot close, which is why the absolute bounds come first.
+    /// `impliedFdvWei` floors to 0 above sqrtPrice ~5.6e39, which covers 1,938 aligned in-range ticks,
     /// and `1 * 3 / 4 == 0` puts a zero FDV inside the band against TARGET_FDV_WEI = 1. Every other guard
-    /// passed, including the post-seed tick check, because the price genuinely IS at tickUpper.
+    /// passes, including the post-seed tick check, because the price genuinely IS at tickUpper.
     function test_ZeroImpliedFdvWithTinyTargetIsRejected() public {
         Deploy.RawConfig memory c = _valid();
         c.tickUpper = 887200;
@@ -347,7 +347,8 @@ contract DeployConfigUnit is Test {
         d.validateConfig(c);
     }
 
-    /// The overflow case specifically: this used to panic (0x11) with no message at all.
+    /// The overflow case specifically: without this bound the multiplication panics (0x11) with no
+    /// message at all, which is why the range check has to come first.
     function test_TinySqrtPriceNoLongerPanicsUnnamed() public {
         Deploy.RawConfig memory c = _valid();
         c.sqrtPriceX96 = 271;

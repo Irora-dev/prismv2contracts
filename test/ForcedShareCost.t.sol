@@ -53,7 +53,7 @@ contract SkimmablePool {
 /// one transfer, and `syncNFTs` is caller-only, so for a contract that cannot call it the gap is permanent
 /// and every forced share is permanent too.
 ///
-/// What remains after that fix is NOT a bug, and the distinction matters because the obvious further
+/// What that leaves is NOT a bug, and the distinction matters because the obvious further
 /// "fix" would be actively harmful. Each round mints exactly one share for one whole token that really did
 /// arrive (200 tokens + 1 = 201 whole, so 129 shares from 128 is correct accounting), and the skim burns
 /// nothing because the holder is still under-mirrored at 200 tokens against 129 shares. Both legs are
@@ -149,7 +149,7 @@ contract ForcedShareCost is Test {
 
     /// The bound that makes this acceptable: forcing STOPS at the victim's own entitlement. An attacker
     /// cannot push a holder past `balanceOf / UNIT`, so the worst case is a non-claimer fully mirrored —
-    /// which is exactly where ordinary trading would have taken it anyway.
+    /// which is exactly where ordinary trading takes it anyway.
     function test_ForcingCannotExceedTheVictimsOwnEntitlement() public {
         uint256 entitled = hook.balanceOf(address(pool)) / 1 ether;   // 200
         for (uint256 i; i < 120; ++i) {                                // far more rounds than the gap

@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 
-/// AUDIT ROUND 2 — CONTRACTS. Attacks the whole-token boundary itself (`_afterTokenTransfer`'s
+/// The whole-token boundary itself (`_afterTokenTransfer`'s
 /// balance-delta mint budget, PrismHookV2.sol:506-514), MAX_REALIGN meeting the transient anti-JIT
 /// quarantine inside a single transfer that both mints AND moves, and the fee-debt arithmetic across
 /// `totalShares` transitions 0 -> 1 -> 0 -> 1.
@@ -158,7 +158,7 @@ contract WholeTokenBoundary is Test {
 
     /// Every whole-token boundary case in one deterministic sweep. The mint budget is a BALANCE DELTA,
     /// so what matters is which boundaries the recipient crossed — not how much was sent.
-    function test_R2C_boundaryExactCases() public {
+    function test_boundaryExactCases() public {
         // 0 -> just under 1: crosses nothing.
         vm.prank(HOOKA); hook.transfer(alice, UNIT - 1);
         assertEq(hook.nftBalanceOf(alice), 0, "sub-unit balance minted a share");
@@ -206,7 +206,7 @@ contract WholeTokenBoundary is Test {
 
     /// Arbitrary residues on both sides of a transfer: shares equal floor(balance/UNIT) exactly, on
     /// both sender and recipient, for every offset the fuzzer can reach below the MAX_REALIGN cap.
-    function testFuzz_R2C_neverUnbackedAcrossAnyResidue(uint96 a, uint96 b, uint96 c) public {
+    function testFuzz_neverUnbackedAcrossAnyResidue(uint96 a, uint96 b, uint96 c) public {
         uint256 x = uint256(a) % (12 * UNIT);
         uint256 y = uint256(b) % (12 * UNIT);
         uint256 z = uint256(c) % (12 * UNIT);
@@ -224,7 +224,7 @@ contract WholeTokenBoundary is Test {
 
     /// Round-tripping value through the hook (an excluded endpoint — the sell/buy path) leaves exactly
     /// the shares the balance backs, with no ratchet in either direction.
-    function testFuzz_R2C_excludedRoundTripNoRatchet(uint96 amt, uint8 rounds) public {
+    function testFuzz_excludedRoundTripNoRatchet(uint96 amt, uint8 rounds) public {
         uint256 a = uint256(amt) % (60 * UNIT) + 1;
         vm.prank(HOOKA); hook.transfer(alice, a);
         for (uint256 i; i < uint256(rounds) % 6 + 1; ++i) {
@@ -240,7 +240,7 @@ contract WholeTokenBoundary is Test {
     /*──────────────── MAX_REALIGN meets the quarantine ────────────────*/
 
     /// A single transfer that BOTH moves and mints, with exact expected numbers.
-    function test_R2C_singleTransferThatBothMintsAndMoves() public {
+    function test_singleTransferThatBothMintsAndMoves() public {
         vm.prank(HOOKA); hook.transfer(alice, 400 ether);
         assertEq(hook.nftBalanceOf(alice), 128, "MAX_REALIGN is not 128");
         uint256 total0 = hook.totalShares();
@@ -274,7 +274,7 @@ contract WholeTokenBoundary is Test {
     /// pre-existing id, so no third party can ever cause someone else's older shares to be
     /// quarantined and have their accrued fees zeroed by `_claimOne`. Proved side by side in ONE
     /// transaction: fresh shares get nothing from the round they diluted, older shares get all of it.
-    function test_R2C_quarantineCannotReachAnOlderShare() public {
+    function test_quarantineCannotReachAnOlderShare() public {
         AtomicRunner r = new AtomicRunner();
         vm.prank(HOOKA); hook.approve(address(r), type(uint256).max);
 
@@ -307,7 +307,7 @@ contract WholeTokenBoundary is Test {
     /// The quarantine does not persist across transactions: shares minted in setUp's transaction are
     /// fully paid by a round collected in the body. (This is the discriminating half — if the marker
     /// leaked, `preRunner` would be credited zero here.)
-    function test_R2C_quarantineDoesNotPersistAcrossTransactions() public {
+    function test_quarantineDoesNotPersistAcrossTransactions() public {
         posm.arm(12 ether);
         hook.pokeFees();
         uint256 perShare = (hook.accFeesPerShareETH() - accRound1) / ACC;
@@ -323,7 +323,7 @@ contract WholeTokenBoundary is Test {
 
     /// Selling in the same tx as the buy burns the FRESH (tail) shares first, so the burn path cannot
     /// launder a quarantined slice into `pendingETH`, and the holder's older shares are untouched.
-    function test_R2C_sameTxBuyPokeSellCapturesNothing() public {
+    function test_sameTxBuyPokeSellCapturesNothing() public {
         AtomicRunner r = new AtomicRunner();
         vm.prank(HOOKA); hook.approve(address(r), type(uint256).max);
         uint256 credited = r.buyPokeSell(hook, HOOKA, 15 ether, posm, 25 ether);
@@ -338,7 +338,7 @@ contract WholeTokenBoundary is Test {
     /// is that no shareholder is ever paid ETH the fee layer did not receive, that the withheld
     /// backlog stays IN the hook rather than becoming claimable by whoever appears next, and that the
     /// flag is one-shot rather than sticky (a sticky flag would silently destroy every future round).
-    function test_R2C_zeroShareCyclesNeverOverPromiseAndNeverPayTheNextArrival() public {
+    function test_zeroShareCyclesNeverOverPromiseAndNeverPayTheNextArrival() public {
         _exitAll(old1); _exitAll(old2); _exitAll(late); _exitAll(address(preRunner));
         assertEq(hook.totalShares(), 0);
         assertTrue(hook.forfeitNextCollection(), "flag not armed when shares hit zero");
@@ -379,7 +379,7 @@ contract WholeTokenBoundary is Test {
 
     /// A holder whose share count falls to zero keeps every wei it accrued while it held: the burn
     /// captures into `pendingETH` before the share is destroyed, and the withdrawal pays it out.
-    function test_R2C_exitKeepsAccruedAndLosesNothing() public {
+    function test_exitKeepsAccruedAndLosesNothing() public {
         uint256 owedBefore;
         uint256[] memory ids = hook.ownedTokensOf(old2);
         for (uint256 i; i < ids.length; ++i) { (uint256 e,) = hook.pendingFees(ids[i]); owedBefore += e; }
@@ -398,7 +398,7 @@ contract WholeTokenBoundary is Test {
 
     /// A holder that arrives strictly between two rounds is paid the second and never the first, and
     /// the two rounds use the correct (different) denominators.
-    function test_R2C_denominatorsAcrossArrivalAreExact() public {
+    function test_denominatorsAcrossArrivalAreExact() public {
         uint256 shares1 = 25;                               // 10 + 6 + 4 + 5 after setUp
         assertEq(hook.totalShares(), shares1);
         assertEq(accRound1, 9 ether * ACC / 16, "round 1 used the wrong denominator");

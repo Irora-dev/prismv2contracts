@@ -21,12 +21,13 @@ interface IHookRead {
 /// Runs the WHOLE launch sequence the way an operator does — vault, hook, `setToken`, `seed()` — against
 /// real mainnet Uniswap v4, **with an airdrop configured**, at the shipped tick-44800 configuration.
 ///
-/// This test exists because its absence let a critical bug ship green. `PrismMigration` took its `deployer`
-/// from `msg.sender`; once the vault moved to CREATE2 that became the FACTORY, whose runtime holds no CALL
-/// opcode, so `setToken` was permanently uncallable and the airdrop could never be wired. 192 tests passed
-/// anyway, because **nothing exercised this path**: `DeployFork` hand-rolls a launch with `MIGRATION_AMOUNT
-/// = 0` and therefore builds no vault at all, and every other test constructs the vault with `new` from the
-/// test contract, which makes the test the deployer and works fine.
+/// This test exists because nothing else exercises this path, and the path is where the unrecoverable
+/// mistakes live. If `PrismMigration` derived its `deployer` from `msg.sender`, deploying the vault through
+/// CREATE2 would make that the FACTORY, whose runtime holds no CALL opcode, so `setToken` would be
+/// permanently uncallable and the airdrop could never be wired — and a suite without this test stays green
+/// throughout: `DeployFork` hand-rolls a launch with `MIGRATION_AMOUNT = 0` and therefore builds no vault at
+/// all, and every other test constructs the vault with `new` from the test contract, which makes the test
+/// the deployer and works fine.
 ///
 /// So the property under test is deliberately end-to-end rather than unit-shaped: with an airdrop
 /// configured, every step of the real sequence must succeed and leave a state the renounce step accepts.
@@ -83,7 +84,8 @@ contract DeployFullRunFork is Test {
         assertEq(IHookRead(hook).balanceOf(hook), SUPPLY - RESERVE, "float not left with the hook");
         assertEq(IHookRead(hook).MIGRATION_VAULT(), vault, "hook points at a different vault");
 
-        // --- step 3: wire the token. THIS is the call that reverted NotDeployer() before the fix ----
+        // --- step 3: wire the token. THIS is the call that reverts NotDeployer() if the vault names a
+        // deployer that cannot call it ------------------------------------------------------------
         PrismMigration(vault).setToken(hook);
         assertEq(PrismMigration(vault).token(), hook, "setToken did not take effect");
 
@@ -120,7 +122,7 @@ contract DeployFullRunFork is Test {
         // Move the deployer's nonce the way a stuck or cancelled wallet transaction would, then re-run.
         vm.setNonce(owner, vm.getNonce(owner) + 11);
         assertEq(d.deployVaultIfAbsent(owner, ROOT, NONCE), vault, "re-run produced a different vault");
-        vm.expectRevert(bytes("predicted address already occupied - bump SALT_NONCE"));
+        vm.expectRevert(bytes("predicted address occupied - if a SQUATTER, bump SALT_NONCE; if it is YOUR OWN hook from an earlier launch, STOP: bumping deploys a second complete token"));
         d.deployHook(owner, vault, RESERVE, NONCE);
         assertGt(hook.code.length, 0, "the original hook is still the only one");
     }

@@ -41,15 +41,15 @@ import {HookMiner} from "./HookMiner.sol";
 ///   Broadcast with `--slow` so each transaction is confirmed before the next is sent, and if any step
 ///   reverts, finish the remaining steps by hand rather than re-running this script.
 ///
-///   A re-run does now fail safely, at the CREATE2 step, because the vault is deployed deterministically
+///   A re-run fails safely, at the CREATE2 step, because the vault is deployed deterministically
 ///   (step 1) rather than at the deployer's nonce. Every input to the hook's mined address is therefore
 ///   identical between runs, so the second run finds the hook already there and stops.
 ///
-///   That was NOT true while the vault used `new`: its address moved with the nonce, so a re-run mined a
-///   DIFFERENT hook address, `require(predicted.code.length == 0)` passed, and you got a second complete
-///   5,000 PRISM system with the first orphaned along with any ETH already paid into its pool. The
-///   runbook asserted the safe behaviour throughout. Prefer finishing by hand regardless — a re-run
-///   stopping is a backstop, not a plan.
+///   That holds only while the vault is deployed deterministically. Create it with `new` and its address
+///   moves with the nonce, so a re-run mines a DIFFERENT hook address, `require(predicted.code.length ==
+///   0)` passes, and you get a second complete 5,000 PRISM system with the first orphaned along with any
+///   ETH already paid into its pool. Prefer finishing by hand regardless — a re-run stopping is a
+///   backstop, not a plan.
 ///
 /// Configure via env (see .env.example). Run:
 ///   forge script script/Deploy.s.sol --rpc-url $RPC --sender <deployer> --broadcast --slow --verify
@@ -147,29 +147,27 @@ contract Deploy is Script {
         // 1. Migration vault (holds the airdrop reserve; excluded from the fee layer by the hook).
         //
         // Deployed through the CREATE2 factory, not with `new`, so its address is a function of the
-        // configuration rather than of the deployer's nonce. That one change fixes two things that a
-        // plain CREATE could not:
+        // configuration rather than of the deployer's nonce. Two properties depend on that, and neither
+        // survives a plain CREATE:
         //
-        //   * A re-run is blocked again. The vault is a constructor argument to the hook, so with a
-        //     nonce-derived address a re-run produced a different vault, a different initcode hash and
-        //     therefore a different mined hook address — the "already occupied" check passed and you got
-        //     a SECOND complete supply with the first orphaned. Now the vault address is identical
-        //     between runs, so the hook address is identical, so the check below fires as documented.
-        //   * The reserve stops being strandable beyond recovery. If this step fails while the hook
-        //     deploy lands, the hook mints the reserve to this address regardless. With a nonce-derived
-        //     address nothing could ever be deployed there again and 89% of supply was gone for good;
-        //     with CREATE2 the vault can still be deployed at that exact address afterwards, so the
-        //     state is recoverable. `Renounce.s.sol` refuses to seal a launch until it is.
+        //   * A re-run is blocked. The vault is a constructor argument to the hook, so a nonce-derived
+        //     vault address gives a different initcode hash and therefore a different mined hook address
+        //     — the "already occupied" check would pass and hand you a SECOND complete supply with the
+        //     first orphaned. With CREATE2 the vault address is identical between runs, so the hook
+        //     address is identical, so the check below fires as documented.
+        //   * The reserve is not strandable beyond recovery. If this step fails while the hook deploy
+        //     lands, the hook mints the reserve to this address regardless. A nonce-derived address could
+        //     never be deployed to again, so 89% of supply would be gone for good; with CREATE2 the vault
+        //     can still be deployed at that exact address afterwards, so the state is recoverable.
+        //     `Renounce.s.sol` refuses to seal a launch until it is.
         //
         // Deploy only if absent, which makes this step idempotent and is what lets a re-run get far
         // enough to hit the hook check instead of quietly diverging here.
         //
-        // Check the factory FIRST, because the vault now goes through it too. This check used to sit
-        // below, which was correct while the hook was the only CREATE2 deployment — after the vault moved
-        // to CREATE2 it meant the first use of the factory preceded the check that it exists. A call to a
-        // codeless address returns `(true, "")`, so `ok` would have been true and the failure would have
-        // surfaced as "vault not deployed at the predicted address" instead of naming the real cause. It
-        // still failed closed; it just lied about why.
+        // Check the factory FIRST: the vault goes through it too, so this check has to precede the first
+        // use of the factory. A call to a codeless address returns `(true, "")`, so a check placed after
+        // the vault deploy would see `ok == true` and the failure would surface as "vault not deployed at
+        // the predicted address" — still failing closed, but naming the wrong cause.
         require(CREATE2_FACTORY.code.length > 0, "CREATE2 factory not deployed on this chain");
 
         address vault = migrationAmount > 0
@@ -187,7 +185,7 @@ contract Deploy is Script {
         // a griefer cannot predict the next attempt: bump SALT_NONCE and re-run.
         // SALT_NONCE must be a SECRET, and it must be set. The owner address and the chain id are both
         // public, so with a nonce of 0 the winning salt is fully derivable and the predicted address is
-        // squattable on demand — demonstrated end to end. This does not make squatting impossible (the
+        // squattable on demand. This does not make squatting impossible (the
         // canonical factory ignores msg.sender, so a leaked nonce is squattable again); it makes the
         // address unpredictable to someone who does not know your nonce.
         address predicted = deployHook(owner, vault, migrationAmount, cfg.saltNonce);
@@ -197,11 +195,11 @@ contract Deploy is Script {
         //
         // Wiring is what opens the airdrop: `PrismMigration.claim` refuses while `token` is zero, and it
         // is permissionless, so the instant `setToken` lands anyone holding a proof can move a holder's
-        // allocation. Doing that inside the deploy meant 4454.677 PRISM became claimable in the same
-        // sequence that created the pool — in fact one transaction BEFORE the pool existed — leaving no
+        // allocation. Doing that inside the deploy would make 4454.677 PRISM claimable in the same
+        // sequence that creates the pool — one transaction BEFORE the pool exists — leaving no
         // window in which the float can trade before 89% of the supply is in circulation.
         //
-        // So it is now `script/OpenAirdrop.s.sol`, run deliberately once the pool has had time to trade.
+        // So it lives in `script/OpenAirdrop.s.sol`, run deliberately once the pool has had time to trade.
         // `setToken` is deployer-only with no deadline and lives on the vault rather than the hook, so the
         // hook can be seeded and renounced immediately while the airdrop stays wireable indefinitely.
         //
@@ -264,8 +262,8 @@ contract Deploy is Script {
     // These are `public pure` on purpose, and `run()` calls them rather than inlining the checks.
     // Every guard here defends a configuration mistake that would otherwise deploy CLEANLY and brick an
     // immutable contract forever, so each one needs a test — and a test can only defend a guard it
-    // shares code with. An earlier version replayed these checks inline inside the test file instead,
-    // which mutation testing showed was worthless: reverting a real guard left the whole suite green.
+    // shares code with. Keep it that way: a test that replays these checks inline instead of calling
+    // them defends nothing, because reverting the real guard leaves the whole suite green.
     //
     // Parameterised rather than env-driven for a specific reason: `vm.setEnv` is process-global and
     // forge runs a contract's tests in PARALLEL, so env-driven tests race and flake. `Renounce.s.sol`
@@ -300,10 +298,10 @@ contract Deploy is Script {
     ///   silently producing a second vault, and a recovery run must be able to fill in a vault whose
     ///   original deployment failed while the hook's mint landed.
     /// @notice Mine a flag-valid CREATE2 salt for the exact constructor args and deploy the hook.
-    /// @dev Public so the full launch sequence is testable with an airdrop configured. That mattered:
-    ///   while this lived inline in `run()`, no test ever ran the sequence with `migrationAmount > 0`
-    ///   (the fork test uses zero and builds no vault), which is how a critical `setToken` bug passed a
-    ///   green suite. See `test/DeployFullRunFork.t.sol`.
+    /// @dev Public so the full launch sequence is testable with an airdrop configured, and it must stay
+    ///   exercised that way: inlined in `run()` it can only be covered with `migrationAmount == 0` (the
+    ///   plain fork test uses zero and builds no vault), which never reaches the vault or `setToken` at
+    ///   all. See `test/DeployFullRunFork.t.sol`.
     function deployHook(address owner_, address vault, uint256 migrationAmount, uint256 saltNonce)
         public returns (address)
     {
@@ -312,7 +310,16 @@ contract Deploy is Script {
         bytes32 saltBase = keccak256(abi.encode(owner_, block.chainid, saltNonce));
         (address predicted, bytes32 salt) =
             HookMiner.find(CREATE2_FACTORY, HOOK_FLAGS, type(PrismHookV2).creationCode, args, saltBase);
-        require(predicted.code.length == 0, "predicted address already occupied - bump SALT_NONCE");
+        // Read this before acting on it: the message has two causes and only one makes bumping correct.
+        // BEFORE any launch the occupant is a squatter, and a new SALT_NONCE is the right answer. AFTER your
+        // own launch the occupant is YOUR OWN HOOK -- and since the nonce feeds the salt, bumping it moves
+        // the predicted address somewhere empty, so this guard goes quiet and the deploy succeeds, handing
+        // you a SECOND complete 5,000 PRISM system with its own pool and its own airdrop reserve. Check
+        // whether a hook of yours is already live before changing anything.
+        require(
+            predicted.code.length == 0,
+            "predicted address occupied - if a SQUATTER, bump SALT_NONCE; if it is YOUR OWN hook from an earlier launch, STOP: bumping deploys a second complete token"
+        );
         (bool ok,) = CREATE2_FACTORY.call(abi.encodePacked(salt, type(PrismHookV2).creationCode, args));
         require(ok, "CREATE2 deploy failed");
         // Confirm something is actually there: a factory-less or misbehaving chain can return ok==true
@@ -335,12 +342,13 @@ contract Deploy is Script {
         require(vault.code.length > 0, "vault not deployed at the predicted address");
         // If something else already occupies the address, it must be the vault this configuration means.
         require(PrismMigration(vault).merkleRoot() == root, "vault at that address has a different root");
-        // The check that matters most, and the one whose absence let a critical bug ship green: the vault
-        // must name a deployer that can actually call `setToken`. When `PrismMigration` took its deployer
-        // from `msg.sender`, deploying through the CREATE2 factory made that the FACTORY — an address with
-        // no CALL opcode in its runtime — so `setToken` was unreachable forever and the reserve could be
-        // minted into a vault that could never be wired to a token. Assert it on-chain rather than trust
-        // the constructor argument, because there is no second chance after the reserve is minted.
+        // The check that matters most: the vault must name a deployer that can actually call `setToken`.
+        // Deploying through the CREATE2 factory makes `msg.sender` the FACTORY — an address with no CALL
+        // opcode in its runtime — so a vault that derived its deployer from `msg.sender` would have
+        // `setToken` unreachable forever, and the reserve could be minted into a vault that can never be
+        // wired to a token. `PrismMigration` takes the authority as a constructor argument for that
+        // reason; assert it on-chain rather than trust the argument, because there is no second chance
+        // after the reserve is minted.
         require(PrismMigration(vault).deployer() == owner_, "vault names a deployer that cannot wire it");
         return vault;
     }
@@ -460,15 +468,16 @@ contract Deploy is Script {
     /// 0, so `pokeFees` returns early forever and every fee the pool ever earns is unclaimable — while
     /// the unseeded remainder is stranded in an ownerless contract with no exit.
     function validateSeededAmount(uint256 float_, uint256 seededPrism, uint256 minSeedEnv) public pure {
-        // MIN_SEED_PRISM may only ever RAISE the bar. As a downward override it was worse than no check
-        // at all: `MIN_SEED_PRISM=0` let 99.98% of supply strand in the hook and still deploy.
+        // MIN_SEED_PRISM may only ever RAISE the bar. Honouring it downward would be worse than having no
+        // check at all: `MIN_SEED_PRISM=0` would let almost the whole supply strand in the hook and still
+        // deploy.
         uint256 floor90 = (float_ * 90) / 100;
         uint256 minSeed = minSeedEnv < floor90 ? floor90 : minSeedEnv;
         require(seededPrism >= minSeed, "seeded PRISM below 90% of the float");
         // And the absolute floor has to be in WHOLE tokens, not one. A share requires a whole token, so
         // a ~1-PRISM pool yields buyers 0 whole tokens (price impact eats the rest), `totalShares` never
-        // leaves 0, `pokeFees` returns early forever and every fee is forfeited permanently — exactly
-        // the brick the old `>= 1 ether` floor was meant to prevent, which it did not.
+        // leaves 0, `pokeFees` returns early forever and every fee is forfeited permanently. A `>= 1 ether`
+        // floor does not prevent that; the floor has to be in whole tokens.
         require(seededPrism >= 50 ether, "seed too small for whole-token buys: fee layer would never start");
     }
 

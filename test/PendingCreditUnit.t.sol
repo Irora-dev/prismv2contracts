@@ -102,7 +102,7 @@ contract NoReceive {
     function withdrawTo(address to) external { hook.withdrawPendingTo(to); }
 }
 
-/// FINAL round-2 fee-layer probes: conservation, credit routing, reentrancy, exclusion.
+/// Fee-layer probes: conservation, credit routing, reentrancy, exclusion.
 contract PendingCreditUnit is Test {
     // Low 14 bits must equal the hook permission flags (beforeInitialize | afterSwap = 0x2040).
     address constant HOOK  = address(0xAB2040);
@@ -341,19 +341,17 @@ contract PendingCreditUnit is Test {
         assertGe(address(HOOK).balance, promised, "hook became insolvent in ETH");
     }
 
-    /// REFUTATION. A reviewer reported that `_withdrawPendingTo`'s restore assigns rather than
-    /// accumulates, so credit a hostile recipient creates mid-flight — by pulling the caller's PRISM on
-    /// an allowance, which burns shares and credits the sender — is clobbered and lost forever. It is
-    /// not, and the reason is structural: the restore runs only when the send returned failure, which
-    /// means the recipient's frame reverted, which rolls back every state change it made INCLUDING that
-    /// credit. To keep the credit the recipient must return successfully, and then the restore never
-    /// runs. The two forms are therefore indistinguishable and the original code is correct.
+    /// WHY `=` AND `+=` ARE INDISTINGUISHABLE IN `_withdrawPendingTo`'s RESTORE. Read as written, the
+    /// assignment looks like it clobbers credit a hostile recipient creates mid-flight — by pulling the
+    /// caller's PRISM on an allowance, which burns shares and credits the sender. It does not, and the
+    /// reason is structural: the restore runs only when the send returned failure, which means the
+    /// recipient's frame reverted, which rolls back every state change it made INCLUDING that credit. To
+    /// keep the credit the recipient must return successfully, and then the restore never runs.
     ///
-    /// Note how the reported probe passed: it asserted `pendingETH == aliceCredit`, which is true both
-    /// if credit was created-then-clobbered AND if none was ever created. It could not tell the two
-    /// apart, so it never demonstrated its own finding. The assertions below do: the accrual is real
-    /// (`wouldBeCredited > 0`), it is genuinely rolled back rather than merely equal, and it is still
-    /// there to be claimed afterwards.
+    /// Do not settle this with a test that asserts `pendingETH == aliceCredit`: that is true both if
+    /// credit was created-then-clobbered AND if none was ever created, so it cannot tell the two apart.
+    /// The assertions below can: the accrual is real (`wouldBeCredited > 0`), it is genuinely rolled back
+    /// rather than merely equal, and it is still there to be claimed afterwards.
     function test_FailedSendRestoresExactlyAndTheHostilePullLeavesNoTrace() public {
         FailAfterWork f = new FailAfterWork(hook);
         vm.prank(alice); hook.transfer(address(f), 1 ether);     // 1 share moves, gives it standing

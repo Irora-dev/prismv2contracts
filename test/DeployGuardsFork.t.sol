@@ -46,14 +46,14 @@ contract DeployGuardsFork is Test {
     // proof, and comes straight out of the tradable float. Both MIN_SEED guards are relative to that
     // shrunken float, so they cannot see it.
     //
-    // THIS TEST IS A DEMONSTRATION, NOT THE REGRESSION GUARD.
+    // THIS TEST IS A DEMONSTRATION, NOT THE GUARD.
     // It replays the guard sequence INLINE (line ~70 below) rather than invoking Deploy.s.sol, so it
-    // shows what the mistake DID on a real deploy but is blind to changes in the script itself —
-    // mutation testing confirmed that reverting the real `==` to `>=` left it green.
+    // shows what the mistake does on a real deploy but is blind to changes in the script itself:
+    // weakening the real `==` to `>=` leaves this test green.
     //
-    // The regression guard now lives in `test/DeployConfigUnit.t.sol`, which calls Deploy's own
-    // `public pure` validators, so the deploy and the tests share code. All 8 guard mutants are killed
-    // there. Keep this test for the end-to-end evidence; rely on that one for protection.
+    // The guard that protects the script lives in `test/DeployConfigUnit.t.sol`, which calls Deploy's own
+    // `public pure` validators, so the deploy and the tests share code. Keep this test for the end-to-end
+    // evidence; rely on that one for protection.
     // ─────────────────────────────────────────────────────────────────────────────────────────────
     function test_MigrationAmountOverMerkleTotalStrandsFloatSilently() public {
         vm.createSelectFork(vm.envString("ETH_RPC_URL"), FORK_BLOCK);

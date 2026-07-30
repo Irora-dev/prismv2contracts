@@ -13,13 +13,13 @@ interface IHookIface {
     function MIGRATION_VAULT() external view returns (address);
 }
 
-/// Opening the airdrop is now a separate action from the deploy, so the ~545 PRISM float can trade for
+/// Opening the airdrop is a separate action from the deploy, so the ~545 PRISM float can trade for
 /// hours before the 4454.677 PRISM reserve becomes movable. These pin the property that makes the split
 /// real — that a full deploy leaves the airdrop CLOSED — and the guards on the step that opens it.
 ///
 /// Why the property matters: `PrismMigration.claim` refuses while `token` is unset and is permissionless
-/// once set, so `setToken` is a switch that opens the reserve to everyone at once. It used to be
-/// transaction 3 of the 4-transaction deploy, one BEFORE the pool was even created.
+/// once set, so `setToken` is a switch that opens the reserve to everyone at once. Inside the deploy it
+/// would land one transaction BEFORE the pool is even created.
 contract OpenAirdropFork is Test {
     uint256 constant FORK_BLOCK = 25604624;
 
@@ -68,9 +68,9 @@ contract OpenAirdropFork is Test {
         PrismMigration(vault).setToken(hook);                          // what the script broadcasts
         assertEq(PrismMigration(vault).token(), hook, "vault was not wired");
 
-        // And the gate is genuinely open: the same call that reverted `TokenNotSet` while closed now gets
-        // as far as proof verification instead. Asserting the revert CHANGED is what shows the gate moved —
-        // `token() != 0` would have been true either way.
+        // And the gate is genuinely open: the same call that reverts `TokenNotSet` while closed now gets
+        // as far as proof verification instead. Asserting the revert CHANGED is what shows the gate moved;
+        // `token() != 0` is true either way and shows nothing.
         bytes32[] memory proof = new bytes32[](0);
         vm.expectRevert(PrismMigration.InvalidProof.selector);
         PrismMigration(vault).claim(address(0xBEEF), 1, proof);

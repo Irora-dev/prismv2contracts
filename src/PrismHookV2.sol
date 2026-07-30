@@ -130,21 +130,22 @@ contract PrismHookV2 is ERC20, BaseHook, Ownable, ReentrancyGuard {
     ///   regardless of the block gas limit. Each mint writes two virgin `_setFeeDebt` slots, which
     ///   cost 20,000 gas each (not 100) once any fee has ever accrued — i.e. always, in production.
     ///   Measured on a mainnet fork with fees accrued: ~76,000 gas per mint, so 128 mints ≈ 9.9M gas,
-    ///   leaving ~41% headroom under the cap. At the previous value of 256 a large claim cost ~19.5M
-    ///   and could not fit in ANY transaction: the two largest holders of the published snapshot
-    ///   (287.24 and 228.04 PRISM) could never have claimed at all, and `PrismMigration` has no
-    ///   sweep, so that PRISM would have been locked forever. Raising this without re-measuring
-    ///   re-introduces that bug.
+    ///   leaving ~41% headroom under the cap. **Do not raise this without re-measuring against that
+    ///   cap.** At 256 a large claim costs ~19.5M gas and fits in NO transaction, which would leave the
+    ///   two largest holders of the published snapshot (287.24 and 228.04 PRISM) unable to claim at all
+    ///   — and `PrismMigration` has no sweep, so their PRISM would be locked forever.
     ///
     ///   IMPORTANT — this bounds the MINT direction only, so it does NOT make every transfer fit in a
     ///   transaction. The move and burn loops are deliberately uncapped (capping them could leave an
     ///   address holding more shares than backing, which is the unbacked-share bug), so a large enough
-    ///   single transfer still exceeds the 2^24 cap. Measured with both fee accumulators nonzero:
-    ///     ~11.5k gas per NFT moved, ~9.2k per NFT burned, ~76k per NFT minted.
-    ///   Practical single-transfer ceilings: **~610 whole tokens** to an under-mirrored recipient
-    ///   (uncapped moves plus a full 128-mint batch, which combine), **~1,457** to an already-mirrored
-    ///   one, **~1,828** for a burn/sell. Above those a holder must split the transfer — chunking
-    ///   always works, so this is a large-holder UX cliff, not stuck funds.
+    ///   single transfer still exceeds the 2^24 cap, and the ceiling is a few hundred whole tokens rather
+    ///   than a few thousand. Cost per NFT depends on whether the fee accumulators are warm: once any fee
+    ///   has been collected `_setFeeDebt` writes into non-virgin slots, so a move costs roughly 2.7x what
+    ///   it does on a pool that has never distributed. **Production is the warm case — size against that.**
+    ///   `test/GasCeiling.t.sol` measures both and derives the ceiling from the warm figure; treat it as the
+    ///   source of truth rather than a number quoted here, since a comment cannot be re-measured.
+    ///   Above the ceiling a holder must split the transfer. Chunking always works and an oversized attempt
+    ///   reverts rather than half-completing, so this is a large-holder UX cliff, not stuck funds.
     uint256 private constant MAX_REALIGN = 128;
 
     /// @dev Transient slot for the realignment-skip flag.
@@ -435,10 +436,9 @@ contract PrismHookV2 is ERC20, BaseHook, Ownable, ReentrancyGuard {
     ///   one expression below, and both the realignment gate and the NFT-transfer destination guard call
     ///   it, so the two exclusion sets can never drift apart. Drift between them is the failure mode.
     ///
-    ///   Read the expression, not a list in a comment. An earlier version of this line enumerated three
-    ///   addresses (zero, the PoolManager, this hook) and was never updated when the set grew to eight,
-    ///   so the doc under-stated the fix on the one function where that matters most — a reader checking
-    ///   whether the parking hole was closed would have found a comment saying it was not.
+    ///   Read the expression, not a list in a comment, and do not add one: a prose list of the members
+    ///   here is a second copy that nothing keeps in step with the code, and on this function of all
+    ///   functions a stale list tells a reader the parking hole is open when it is closed.
     /// @dev Addresses that must never hold fee-shares. The test is not "is this infrastructure" but
     ///   "could a share resting here ever be claimed" — a share on an address that cannot call
     ///   `withdrawPending()` still counts in `totalShares`, so it dilutes every real holder's slice
@@ -475,14 +475,13 @@ contract PrismHookV2 is ERC20, BaseHook, Ownable, ReentrancyGuard {
         //
         // `amount / UNIT + 1` looks equivalent and is not. The `+1` is claimable by a transfer that
         // moved nothing, and the bound is per CALL with nothing carried across a transaction, so a
-        // stranger could still `transfer(x, 0)` in a loop and force shares onto `x` — measured at
-        // 1.20x the pre-clamp cost per share, not the 128x the bound implies, and free of even the
-        // `_maybePoke` cost when the loop runs inside a `PoolManager.unlock` callback. Deriving the
-        // budget from the delta removes the free unit: a transfer that crosses no boundary mints nothing,
-        // however many times it is repeated.
+        // stranger could still `transfer(x, 0)` in a loop and force shares onto `x` at roughly the
+        // ordinary per-share cost — the bound raises it by ~1.2x, not the 128x it implies — and free of
+        // even the `_maybePoke` cost when the loop runs inside a `PoolManager.unlock` callback. Deriving
+        // the budget from the delta removes the free unit: a transfer that crosses no boundary mints
+        // nothing, however many times it is repeated.
         //
-        // DO NOT read this bound as making forced minting expensive. It does not, and two earlier
-        // versions of this comment claimed otherwise and were both disproved — see
+        // DO NOT read this bound as making forced minting expensive. It does not — see
         // `test/ForcedShareCost.t.sol`, which pins the real behaviour:
         //
         //   * Against a FULLY mirrored holder it is genuinely self-limiting. Pushing a balance over a
@@ -545,11 +544,11 @@ contract PrismHookV2 is ERC20, BaseHook, Ownable, ReentrancyGuard {
         // exactly that gap for anyone receiving more than 128 whole tokens in one transfer, and this is
         // the only channel that closes it automatically.
         //
-        // Charging the mint against `mintBudget - transferable` instead was tried and REVERTED. It made
-        // the gap exactly invariant under inflows: for a fully mirrored sender `transferable == mintBudget`,
-        // so the room is always zero and nothing heals. Measured — a holder who bought 300 whole tokens
-        // through a router stayed at 128 shares through ten further buys, its 172-share gap frozen, and
-        // took **20% less** of a fee round than an identical holder who happened to know about
+        // DO NOT charge the mint against `mintBudget - transferable` instead. That makes the gap exactly
+        // invariant under inflows: for a fully mirrored sender `transferable == mintBudget`, so the room
+        // is always zero and nothing heals. A holder who bought 300 whole tokens through a router would
+        // then sit at 128 shares through every later buy, its 172-share gap frozen, taking **20% less**
+        // of a fee round than an identical holder who happened to know about
         // `syncNFTs` (which is caller-only, so a contract holder can never catch up at all). Trading a
         // permanent fee loss for honest holders against a slower griefing vector is the wrong trade: the
         // griefing steals nothing, saturates at the victim's own entitlement, and leaves the attacker
@@ -740,12 +739,11 @@ contract PrismHookV2 is ERC20, BaseHook, Ownable, ReentrancyGuard {
             // non-reverting — this contract is immutable with no admin, so a bare revert on a POSM-side
             // failure (pause, migration, deadline change) would be unrecoverable.
             //
-            // But it must not be SILENT. The accepted mitigation for the swap-path backlog finding is a
-            // keeper collecting often, and a keeper cannot bound a backlog it cannot see: without this
-            // event a failing collect is indistinguishable from "nothing accrued", so a POSM problem
-            // would let the backlog compound while every poke still appeared to succeed. Measured in
-            // review: ten "successful" pokes, zero collection, then a late arrival taking half of a
-            // 5 ETH backlog it never earned. Alarm on this event.
+            // But it must not be SILENT. What bounds the swap-path backlog is a keeper collecting often,
+            // and a keeper cannot bound a backlog it cannot see: without this event a failing collect is
+            // indistinguishable from "nothing accrued", so a POSM problem would let the backlog compound
+            // while every poke still appeared to succeed — and a share minted late then takes a slice of
+            // a backlog it never earned. Alarm on this event.
             emit PokeCollectFailed();
         }
     }
@@ -781,12 +779,12 @@ contract PrismHookV2 is ERC20, BaseHook, Ownable, ReentrancyGuard {
     ///
     ///   Being self-only does NOT by itself put an address's share count beyond third-party reach:
     ///   `_afterTokenTransfer` realigns the RECIPIENT off its `balanceOf`, so a bare `transfer(x, 0)`
-    ///   used to force up to `MAX_REALIGN` shares onto an under-mirrored `x` for free, repeatedly. That
-    ///   never created an unbacked share and earned the caller nothing, but it let anyone raise `x`'s
-    ///   cost to move its own balance and — against a contract holding PRISM that cannot call
-    ///   `withdrawPending` — maximise the share of every fee round diverted to shares nobody will ever
-    ///   claim. `_afterTokenTransfer` now bounds fresh mints to what the transfer actually moved, so
-    ///   the most a stranger can force is one share per transfer instead of 128.
+    ///   reaches an under-mirrored `x` from outside. What limits that is the mint budget there, which is
+    ///   derived from the balance delta and so caps a valueless transfer at one share — keep it. Without
+    ///   that bound a stranger could force up to `MAX_REALIGN` shares onto `x` per call, repeatedly: never
+    ///   an unbacked share and no gain to the caller, but it lets anyone raise `x`'s cost to move its own
+    ///   balance and — against a contract holding PRISM that cannot call `withdrawPending` — maximise the
+    ///   share of every fee round diverted to shares nobody will ever claim.
     ///   `max == 0` means "as many as fit up to the internal per-call cap".
     function syncNFTs(uint256 max) external nonReentrant {
         address user = msg.sender;
@@ -804,20 +802,20 @@ contract PrismHookV2 is ERC20, BaseHook, Ownable, ReentrancyGuard {
     ///   blocks the PRISM leg, and a failed ETH send restores the credit (retry to another
     ///   recipient) instead of reverting the whole call. Balances are zeroed before the send
     ///   (checks-effects), and the function is `nonReentrant` at every entry point.
-    /// @dev A permissionless `pushPending(holder)` was added here and then REMOVED, because it made the
-    ///   problem it was meant to mitigate strictly worse. The intent was to rescue fees credited to a
+    /// @dev DO NOT add a permissionless `pushPending(holder)` here. It makes the problem it would be
+    ///   meant to mitigate strictly worse. The intent would be to rescue fees credited to a
     ///   contract that cannot call `withdrawPending` (an ordinary Uniswap V2/V3 pool holding PRISM is
     ///   the unavoidable case). Paying those fees out, however, sends PRISM *to* that contract, and
     ///   since it is not excluded, `_afterTokenTransfer` then realigns it and mints it MORE fee-shares
-    ///   — a ratchet that increases its permanent cut of every future round. Measured: one push moved a
-    ///   pool from 29.7% to 36.9% of the fee layer. It also let anyone take a pool's rescued fees for
+    ///   — a ratchet in which every push raises its permanent cut of every future round. It would also
+    ///   let anyone take a pool's rescued fees for
     ///   themselves via `skim()`, and let anyone pin a contract holder's fees to that holder before it
     ///   could route them elsewhere with `withdrawPendingTo`.
     ///
     ///   So the stranded-fee residual stands, documented at `_isExcluded`: value credited to a
     ///   non-claiming contract stays credited and unspent, which is inert. That is strictly better than
     ///   a mechanism that compounds the dilution and hands the proceeds to whoever calls first. Do not
-    ///   re-add this without solving the realign-on-arrival problem first.
+    ///   add this without solving the realign-on-arrival problem first.
     function _withdrawPendingTo(address recipient) private {
         uint256 prismAmount = pendingPRISM[msg.sender];
         if (prismAmount > 0) {
@@ -831,9 +829,9 @@ contract PrismHookV2 is ERC20, BaseHook, Ownable, ReentrancyGuard {
             pendingETH[msg.sender] = 0;
             (bool ok,) = recipient.call{value: ethAmount}("");
             if (ok) { ethSent = ethAmount; }
-            // Restore so the caller can retry. Assignment is correct here, and deliberately so: a
-            // reviewer read this as clobbering credit that a hostile recipient creates mid-flight while
-            // holding the caller's allowance. It cannot. This branch runs only when `ok` is false, which
+            // Restore so the caller can retry. Assignment is correct here, and deliberately so. It can
+            // read as clobbering credit that a hostile recipient creates mid-flight while holding the
+            // caller's allowance. It cannot. This branch runs only when `ok` is false, which
             // means the recipient's frame reverted or ran out of gas — and either way every state change
             // it made was rolled back with it, including any credit. For credit to survive to this line
             // the recipient would have to return successfully, and then `ok` is true and this line never
@@ -911,8 +909,8 @@ contract PrismHookV2 is ERC20, BaseHook, Ownable, ReentrancyGuard {
         // NOTE: we deliberately do NOT poke here. Forcing a ~200k-gas POSM collect on every
         // marketplace NFT transfer is not worth it to crystallize a seller's small
         // accrued-since-last-poke fees — a seller who cares can `claim` first (opt-in). The
-        // residual seller->buyer fee drift is part of the documented H1 fee-timing item, fully
-        // resolved by the synchronous-accrual redesign, not by taxing every transfer.
+        // residual seller->buyer fee drift is the documented fee-timing property of booking fees on
+        // collection; it is bounded by collecting often, not by taxing every transfer.
         _move(from, to, tokenId);
 
         _setSilent(true);

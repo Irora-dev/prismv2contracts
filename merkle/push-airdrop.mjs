@@ -27,15 +27,15 @@ import { readFileSync } from "fs";
 import { Contract, JsonRpcProvider, Wallet, formatEther, formatUnits } from "ethers";
 
 // ── the gas model ────────────────────────────────────────────────────────────────────────────────
-// Calibrated on a mainnet fork WITH pool fees accrued, which is the only state that matters: every
+// Calibrate on a mainnet fork WITH pool fees accrued, which is the only state that matters: every
 // mint writes two virgin `_setFeeDebt` slots, and those cost 20,000 gas each rather than 100 once any
-// fee has ever been collected. An earlier calibration was taken on a pool that had never swapped, so
-// it read ~37,000/NFT and understated the real cost by 2.05x — which under-sized every chunk.
-// 63,278 measured on a fork with both accumulators hot, plus ~4% margin. The 61,297 that stood here was
-// taken on a colder path and ran ~3.2% light — small per row, but a 177-row dust chunk is then ~350k short,
-// the batcher stops before starting a row it cannot finish, and the chunk delivers 169 of 177. Nothing is
-// lost (the runner reports the shortfall and a re-run converges) but the documented single pass did not
-// finish, so the estimate must be conservative rather than central.
+// fee has ever been collected. A figure taken on a pool that has never swapped reads ~37,000/NFT and
+// understates the real cost by 2.05x, which under-sizes every chunk.
+// GAS_BASE is 63,278 measured on a fork with both accumulators hot, plus ~4% margin. Keep that margin:
+// a per-row figure that runs even ~3% light is small per row but leaves a 177-row dust chunk ~350k short,
+// and the batcher then stops before starting a row it cannot finish, so the chunk delivers 169 of 177.
+// Nothing is lost (the runner reports the shortfall and a re-run converges) but the single pass does not
+// finish, so this estimate must be conservative rather than central.
 const GAS_BASE = 66_000;        // a claim that mints no NFT (holder owns < 1 whole PRISM)
 const GAS_PER_NFT = 78_000;     // each whole PRISM mints one fee-share NFT (measured ~76,300)
 const GAS_POKE = 70_000;        // _maybePoke() fires a POSM collect on any claim that mints
@@ -53,6 +53,8 @@ const ABI = [
   "function push(address[] accounts, uint256[] amounts, bytes32[][] proofs, uint256 from, uint256 gasFloor) returns (uint256 delivered, uint256 alreadyClaimed, uint256 failed, uint256 stoppedAt)",
   "function pendingOf(address[] accounts) view returns (bool[])",
   "function migration() view returns (address)",
+  "function token() view returns (address)",
+  "function balanceOf(address) view returns (uint256)",
   "event Pushed(uint256 delivered, uint256 alreadyClaimed, uint256 failed, uint256 stoppedAt)",
   "event RowFailed(uint256 index, address account)",
 ];
@@ -113,6 +115,38 @@ const provider = new JsonRpcProvider(rpcUrl);
 const signer = pk ? new Wallet(pk, provider) : null;
 const batcher = new Contract(batcherAddr, ABI, signer ?? provider);
 
+// What the VAULT still holds, read from chain. This is the only completion check that does not come from the
+// claims file, and that is exactly why it exists: every other check compares `rows` against `allRows`, and
+// BOTH are parsed from the same file -- so pointing `--claims` at a 3-row subset would let the runner
+// announce "all 3 confirmed paid" and exit 0 while everyone outside that file is still owed. A file cannot
+// audit itself. The vault reaching zero is the launch's actual definition of done, so ask it directly.
+async function vaultStillOwes() {
+  // Retry, because one 429 during a 48-transaction push is ordinary and `JsonRpcProvider` does not retry
+  // `eth_call` for us. Returns a bigint, or the string "unknown" -- NOT null, and never null: both call
+  // sites treat a missing objection as "no objection", so a null on failure would let a single
+  // rate-limited `balanceOf` silence the veto and exit 0 over a subset file with holders unpaid.
+  // "I could not read it" and "it is empty" are opposite conclusions and must not share a value.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const vault = await batcher.migration();
+      const token = await new Contract(vault, ABI, provider).token();
+      if (!token || /^0x0{40}$/i.test(token)) return 0n;       // airdrop not open yet: nothing is owed via it
+      return await new Contract(token, ABI, provider).balanceOf(vault);
+    } catch {
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
+  return "unknown";
+}
+
+/** Refuse to call a run complete on a reading we could not take. */
+function refuseIfUnverifiable(owed) {
+  if (owed !== "unknown") return;
+  console.log("\nCOULD NOT READ the vault balance, so this run cannot confirm that everyone has been paid.");
+  console.log("Exiting non-zero rather than reporting success on a reading that never arrived. Re-run it.");
+  process.exit(1);
+}
+
 console.log(`batcher          : ${batcherAddr}`);
 console.log(`vault            : ${await batcher.migration()}`);
 
@@ -127,15 +161,40 @@ for (let i = 0; i < rows.length; i += 500) {
 console.log(`${pending.length} of ${rows.length} outstanding`);
 if (pending.length === 0) {
   console.log("\nnothing to do — every holder in this list has already been paid.");
+  // "this list" may be a --min-prism SUBSET, and this exit code is a launch-blocking signal: LAUNCH.md
+  // tells the operator to re-run until it exits 0. Exiting 0 here after paying only the holders above the
+  // threshold would end that loop with the dust holders — 783 of the 1203 — still owed, and report success
+  // while doing it. The final verification below already checks the full tree; this early return skipped it.
+  const owedEarly = await vaultStillOwes();
+  refuseIfUnverifiable(owedEarly);
+  if (owedEarly > 0n) {
+    console.log(`\nthe vault still holds ${owedEarly} wei, so holders outside this claims file are owed.`);
+    console.log("Re-run with the shipped ../airdrop/claims.json. Exiting non-zero.");
+    process.exit(1);
+  }
+  if (rows.length < allRows.length) {
+    process.stdout.write("checking the holders excluded by --min-prism too… ");
+    const outstanding = [];
+    for (let i = 0; i < allRows.length; i += 500) {
+      const slice = allRows.slice(i, i + 500);
+      const flags = await batcher.pendingOf(slice.map((r) => r.address));
+      slice.forEach((r, j) => flags[j] && outstanding.push(r));
+    }
+    console.log(`${outstanding.length} of ${allRows.length} outstanding`);
+    if (outstanding.length > 0) {
+      console.log(`\n${outstanding.length} holder(s) outside this --min-prism subset have NOT been paid.`);
+      console.log("Re-run without --min-prism to pay them. Exiting non-zero so a wrapper does not stop here.");
+      process.exit(1);
+    }
+  }
   process.exit(0);
 }
 
 // ── pack chunks by estimated gas, respecting the per-transaction gas cap ────────────────────────
 // The transaction's gas limit and the contract's `gasFloor` are independent budgets. `gasFloor` only
 // has to cover the NEXT row; the limit has to cover the whole chunk plus one row's headroom so the
-// last row is never entered under-funded. Deriving the limit from the floor (as this script used to)
-// inflated it far past 2^24 for any chunk containing a large holder, and the node then rejected the
-// transaction outright.
+// last row is never entered under-funded. Do not derive the limit from the floor: that inflates it far
+// past 2^24 for any chunk containing a large holder, and the node then rejects the transaction outright.
 const rowsPerChunkCap = (r) => rowGas(r.amount, r.proof.length);
 const worstRow = (rs) => Math.max(...rs.map(rowsPerChunkCap));
 
@@ -197,8 +256,11 @@ const intrinsicOf = (rows) =>
   GAS_TX_OVERHEAD +
   CALLDATA_GAS_PER_BYTE *
     (4 + rows.reduce((s, r) => s + 32 * 4 + r.proof.length * 32, 0));
+// `r.amount`, not `r`: `rowGas` takes the amount. Passing the row object threw "Cannot mix BigInt and other
+// types" before a plan could even be printed, so neither `--dry-run` nor a real push could run at all --
+// the airdrop was undeliverable with the shipped tool. `rowsPerChunkCap` above has always had it right.
 const executionOf = (rows) =>
-  rows.reduce((s, r) => s + (rowGas(r, r.proof.length) - GAS_CALLDATA_BASE - r.proof.length * GAS_CALLDATA_PER_PROOF), 0);
+  rows.reduce((s, r) => s + (rowGas(r.amount, r.proof.length) - GAS_CALLDATA_BASE - r.proof.length * GAS_CALLDATA_PER_PROOF), 0);
 
 const unfinishable = chunks
   .map((c, i) => ({ i, need: executionOf(c.rows), avail: c.gasLimit - intrinsicOf(c.rows), rows: c.rows.length }))
@@ -326,13 +388,22 @@ console.log(`\ndone: ${delivered} delivered across ${chunks.length} transaction(
 if (failedRows > 0) console.log(`${failedRows} row(s) were attempted and did not deliver.`);
 if (chunkErrors > 0) console.log(`${chunkErrors} chunk(s) never landed.`);
 
+const owed = await vaultStillOwes();
+if (stillPending === 0) refuseIfUnverifiable(owed);
+if (owed !== "unknown" && owed > 0n && stillPending === 0) {
+  // The claims file says everyone in it is paid, and the vault disagrees. The vault is authoritative.
+  console.log(`\nBUT the vault still holds ${owed} wei — holders outside this claims file are unpaid.`);
+  console.log(`This claims file describes ${allRows.length} holders. Re-run with ../airdrop/claims.json.`);
+  process.exit(1);
+}
+
 if (stillPending > 0) {
   // Distinguish "retry will help" from "retrying forever will not". A row that is unpaid but was
-  // never attempted-and-failed is usually a proof that does not verify against the deployed root —
-  // no number of re-runs fixes that, and the old script's advice to just re-run looped indefinitely.
-  // Only a DELIVERY counts as progress. Failures do not: a row that reverts deterministically (a
-  // proof that does not verify against the deployed root) fails identically on every attempt, so
-  // treating a failure as progress is what turned "re-run to finish" into an infinite loop.
+  // never attempted-and-failed is usually a proof that does not verify against the deployed root, and
+  // no number of re-runs fixes that — so telling the operator to re-run regardless sends them round a
+  // loop that cannot terminate. Only a DELIVERY counts as progress. Failures must not: a row that
+  // reverts deterministically (a proof that does not verify against the deployed root) fails
+  // identically on every attempt, so counting a failure as progress is what makes the loop infinite.
   if (delivered > 0) {
     console.log("Re-run this command to finish them — already-paid holders are skipped automatically.");
   } else {

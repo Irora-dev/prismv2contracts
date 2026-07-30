@@ -13,10 +13,13 @@ contract HookStub {
     address public MIGRATION_VAULT;
     uint256 public hookPositionTokenId;
     address public POSM;
+    int24 public globalTickLower;
+    int24 public globalTickUpper;
     function setSeeded(bool v) external { seeded = v; }
     function setOwner(address v) external { owner = v; }
     function setVault(address v) external { MIGRATION_VAULT = v; }
     function setPosition(address posm, uint256 id) external { POSM = posm; hookPositionTokenId = id; }
+    function setRange(int24 lo, int24 hi) external { globalTickLower = lo; globalTickUpper = hi; }
     function renounceOwnership() external { renounced = true; owner = address(0); }
 }
 
@@ -208,6 +211,53 @@ contract RenounceGuard is Test {
     function test_SkipsTheLiquidityCheckWhenTheFloorIsUnset() public {
         _seededWithLiquidity(1);                               // absurdly low, but unchecked
         script_.renounce(address(hook), 0);                    // 0 = no floor
+        assertTrue(hook.renounced(), "renounced");
+    }
+
+    // ── the seeded RANGE, which the liquidity floor cannot see ────────────────────────────────────────
+    //
+    // A mint deposits `L * (sqrtUpper - sqrtLower) / 2**96`, so the PRISM it consumes depends on the range
+    // as much as on the liquidity. A hand-run `seed()` that typed the intended liquidity over the wrong
+    // range therefore satisfies the floor above TO THE WEI while leaving almost the whole float behind:
+    // measured on a fork at 539.897 PRISM, 98.99% of the float, in a contract one transaction from being
+    // ownerless. These assert the range is checked separately, because liquidity alone cannot catch it.
+
+    int24 constant SHIP_LOWER = -887200;
+    int24 constant SHIP_UPPER = 44800;
+
+    function test_RefusesASeedOverTheWrongRangeEvenThoughTheLiquidityFloorPasses() public {
+        _seededWithLiquidity(58_060_767_042_176_831_420);      // exactly the shipped SEED_LIQUIDITY
+        hook.setRange(44600, SHIP_UPPER);                      // aligned, in range, a plausible slip
+        vm.expectRevert(bytes(
+            "seeded range does not match SEED_TICK_LOWER/SEED_TICK_UPPER - the pool was seeded over the wrong range, do NOT renounce"
+        ));
+        script_.renounce(address(hook), FLOOR, SHIP_LOWER, SHIP_UPPER, true);
+        assertFalse(hook.renounced(), "nothing was renounced");
+    }
+
+    function test_RenouncesWhenTheSeededRangeMatches() public {
+        _seededWithLiquidity(58_060_767_042_176_831_420);
+        hook.setRange(SHIP_LOWER, SHIP_UPPER);
+        script_.renounce(address(hook), FLOOR, SHIP_LOWER, SHIP_UPPER, true);
+        assertTrue(hook.renounced(), "renounced");
+    }
+
+    /// A wrong upper tick is the same class of error and equally invisible to the liquidity floor.
+    function test_RefusesAWrongUpperTick() public {
+        _seededWithLiquidity(58_060_767_042_176_831_420);
+        hook.setRange(SHIP_LOWER, 44600);
+        vm.expectRevert(bytes(
+            "seeded range does not match SEED_TICK_LOWER/SEED_TICK_UPPER - the pool was seeded over the wrong range, do NOT renounce"
+        ));
+        script_.renounce(address(hook), FLOOR, SHIP_LOWER, SHIP_UPPER, true);
+    }
+
+    /// Opted out, the same mismatched range passes — an operator whose .env predates the check is not
+    /// blocked by it, exactly as with MIN_SEED_LIQUIDITY.
+    function test_SkipsTheRangeCheckWhenNotOptedIn() public {
+        _seededWithLiquidity(58_060_767_042_176_831_420);
+        hook.setRange(44600, SHIP_UPPER);
+        script_.renounce(address(hook), FLOOR, SHIP_LOWER, SHIP_UPPER, false);
         assertTrue(hook.renounced(), "renounced");
     }
 }

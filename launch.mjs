@@ -40,9 +40,28 @@ const note  = (s) => say(`  ${DIM}${s}${R}`);
 /** Placeholder until the endpoint is known; reassigned once RPC is read. */
 let redact = (s) => String(s ?? "");
 
+/** Set once a broadcast has been attempted, after which "nothing was changed" stops being true. */
+let broadcastStarted = false;
+
 function die(msg, hint) {
   say(); bad(msg); if (hint) note(hint);
-  say(); say(`${DIM}Nothing was changed by this run. Fix the above and run again.${R}`);
+  say();
+  if (broadcastStarted) {
+    // A forge broadcast is one transaction per state-changing call, and a reverted transaction does not
+    // stop the next from being mined — so a failure here can still have changed the chain. Telling the
+    // operator otherwise is an invitation to re-run an irreversible step.
+    say(`${RED}A broadcast was already attempted, so this run MAY have changed on-chain state.${R}`);
+    say(`${DIM}Do NOT simply run again. Check what landed first: read the forge output above, and${R}`);
+    // Do NOT name Deploy's artifact here. forge names the directory after the SCRIPT, so the renounce
+    // writes broadcast/Renounce.s.sol/… and the airdrop step broadcast/OpenAirdrop.s.sol/… — and since
+    // those steps are only reachable once the deploy has already succeeded, naming Deploy's file would hand
+    // an operator whose renounce just failed a complete, successful, entirely irrelevant deploy record as
+    // reassurance. From the one message whose whole job is to stop a wrong re-run.
+    say(`${DIM}the broadcast/ directory named after the script you just ran. Then see LAUNCH.md §6${R}`);
+    say(`${DIM}and its Troubleshooting table.${R}`);
+  } else {
+    say(`${DIM}Nothing was changed by this run. Fix the above and run again.${R}`);
+  }
   rl.close(); process.exit(1);
 }
 
@@ -56,13 +75,37 @@ const askYes = async (q) => /^y(es)?$/i.test((await rl.question(`  ${q} [y/N] `)
 
 /** Run a command, showing it first. `quiet` keeps output for us instead of the screen. */
 function run(cmd, args, { quiet = false, allowFail = false, env } = {}) {
-  const shown = [cmd, ...args.map((a) => (a.includes(" ") ? `"${a}"` : a))].join(" ");
+  // Redact before printing. Commands are shown so nothing is hidden, and this is the line that puts them
+  // in the operator's scrollback — so it is also the line that would put an API key there. Arguments carry
+  // the real endpoint (a literal `$RPC_URL` is not expanded: there is no shell here, and forge reads it as
+  // a filesystem path), so the substitution has to happen on the way to the screen, not on the way to exec.
+  const shown = redact([cmd, ...args.map((a) => (a.includes(" ") ? `"${a}"` : a))].join(" "));
   note(`$ ${shown}`);
-  const r = spawnSync(cmd, args, {
-    stdio: quiet ? ["ignore", "pipe", "pipe"] : "inherit",
-    env: { ...process.env, ...env },
-    encoding: "utf8",
-  });
+
+  // Give the terminal back before handing it to the child.
+  //
+  // `createInterface` puts a tty into RAW mode and keeps it there for the life of the interface, and
+  // `stdio: "inherit"` hands that same terminal to forge — so cooked mode has to be restored before the
+  // child gets it. Raw mode means `-icanon -icrnl`, so Enter's carriage return is never translated to a
+  // newline and Foundry's "Enter keystore password:" prompt — a canonical-mode line reader — waits for a
+  // line that cannot arrive. `-isig` also means Ctrl-C cannot interrupt it, so it hangs rather than fails,
+  // at every signature, for anyone using a keystore. Foundry sets `echonl` itself but assumes canonical
+  // mode is already on.
+  const wasRaw = Boolean(stdin.isTTY && stdin.isRaw);
+  if (wasRaw) stdin.setRawMode(false);
+  rl.pause();
+  let r;
+  try {
+    r = spawnSync(cmd, args, {
+      stdio: quiet ? ["ignore", "pipe", "pipe"] : "inherit",
+      env: { ...process.env, ...env },
+      encoding: "utf8",
+    });
+  } finally {
+    // Restore whatever readline had, so the prompts after this step keep working.
+    rl.resume();
+    if (wasRaw && stdin.isTTY) stdin.setRawMode(true);
+  }
   if (r.status !== 0 && !allowFail) {
     die(`\`${cmd}\` failed (exit ${r.status}).`,
         quiet ? redact((r.stderr || "").trim().split("\n").slice(-4).join("\n")) : undefined);
@@ -75,10 +118,26 @@ function run(cmd, args, { quiet = false, allowFail = false, env } = {}) {
  *  failure, and letting cast's raw `Error:` text through makes a normal reading look like a crash. */
 function castCall(to, sig, args = []) {
   try {
-    return execFileSync("cast", ["call", to, sig, ...args, "--rpc-url", RPC],
+    const out = execFileSync("cast", ["call", to, sig, ...args, "--rpc-url", RPC],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    // cast annotates a numeric return with a readable magnitude — `1000000004 [1e9]`. That is a courtesy
+    // on a terminal and wrong everywhere else: it is not a number anything can parse, and `vm.envUint`
+    // rejects it outright, so a reading passed on as a value would fail at the step that consumes it.
+    // Strip it here, at the one boundary every reading crosses, rather than at each call site.
+    return out.replace(/\s*\[[^\]]*\]$/, "");
+  } catch { return null; }
+}
+/** Is there a contract at this address? Returns null if the question could not be ASKED, which is a
+ *  different fact from "no". `cast call` fails for both, and reading a failure as "nothing is deployed" is
+ *  how a momentary endpoint problem becomes an offer to deploy a second system on top of a live one. */
+function castCode(addr) {
+  try {
+    return execFileSync("cast", ["code", addr, "--rpc-url", RPC],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch { return null; }
 }
+// NOTE: `isZeroAddr(null)` is TRUE, so never hand it an unchecked reading — "the call failed" would come
+// back as "the zero address", and for `owner()` that means "already renounced".
 const isZeroAddr = (v) => !v || /^0x0{40}$/i.test(v.replace(/^0x/, "0x").toLowerCase());
 
 // ── prerequisites ────────────────────────────────────────────────────────────────────────────────
@@ -105,14 +164,51 @@ process.env.ETH_RPC_URL = RPC;
 
 // Strip the endpoint out of anything we echo from here on. Foundry puts the full URL in its error text and
 // that URL usually embeds an API key, so printing it would leave the key in the operator's scrollback.
-redact = (s) => String(s ?? "").split(RPC).join("$RPC_URL");
+// Redact the SECRET, not just the string you were given. An exact whole-URL replace is not enough, because
+// reqwest re-emits a NORMALISED url: an explicit default port is dropped (`:80` disappears), an uppercase
+// scheme is lower-cased, a trailing dot in the host is stripped. Any of those three ordinary spellings
+// makes a whole-URL substring match miss and prints the key verbatim. Redacting the key itself holds
+// however the surrounding url is spelled.
+redact = (() => {
+  const urls = new Set([RPC]);
+  const secrets = new Set();
+  try {
+    const u = new URL(RPC);
+    urls.add(u.href);                                  // the normalised form
+    urls.add(u.origin + u.pathname + u.search);
+    if (u.username) secrets.add(u.username);
+    if (u.password) secrets.add(u.password);
+    // Provider keys live in a path segment or a query value. Anything long enough to be one is redacted.
+    for (const seg of u.pathname.split("/")) if (seg.length >= 8) secrets.add(seg);
+    for (const [, v] of new URLSearchParams(u.search)) if (v.length >= 8) secrets.add(v);
+  } catch { /* not parseable as a URL; the plain replacement below still applies */ }
+  const longestFirst = (a, b) => b.length - a.length;
+  const u2 = [...urls].filter(Boolean).sort(longestFirst);
+  const s2 = [...secrets].filter(Boolean).sort(longestFirst);
+  return (s) => {
+    let out = String(s ?? "");
+    for (const p of u2) out = out.split(p).join("$RPC_URL");
+    for (const p of s2) out = out.split(p).join("<redacted>");
+    return out;
+  };
+})();
 
 try {
-  const chain = execFileSync("cast", ["chain-id", "--rpc-url", RPC], { encoding: "utf8" }).trim();
+  // `stdio` is not optional here. Without it node pipes cast's stderr straight to this terminal, and cast's
+  // transport errors quote the full endpoint — so the API key landed in the operator's scrollback at the
+  // FIRST rpc call, one line after this script promised not to print it. Capture it instead and let the
+  // `catch` below redact it.
+  const chain = execFileSync("cast", ["chain-id", "--rpc-url", RPC],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   if (chain !== "1") die(`That endpoint is chain ${chain}, not Ethereum mainnet (1).`);
   ok("endpoint is Ethereum mainnet");
 } catch (e) {
-  die("Could not reach that RPC endpoint.", redact(String(e.message || e).split("\n")[0]));
+  // `e.message` is only "Command failed: cast chain-id …" — the actual reason (DNS, TLS, refused, 401) is on
+  // stderr, which is now captured rather than echoed. Show it, redacted, or the operator gets a failure with
+  // no diagnosis.
+  const why = redact([String(e.stderr ?? "").trim(), String(e.message ?? e).trim()]
+    .filter(Boolean).join("\n").split("\n").slice(0, 3).join("\n"));
+  die("Could not reach that RPC endpoint.", why || undefined);
 }
 
 // ── locate the launch from chain state, not from a progress file ──────────────────────────────────
@@ -130,20 +226,115 @@ for (const [i, p] of ART.entries()) {
   } catch { /* fall through */ }
 }
 
+// A missing broadcast record is NOT evidence that nothing was deployed, and must never be read as such.
+// `broadcast/` is gitignored, so a clean checkout, a second machine, a different working directory or a
+// `git clean` all reach this point with a live token on chain. Inferring "fresh" from a missing record ends
+// in a SECOND complete 5,000 PRISM system: step 2 writes a new random SALT_NONCE, which moves the predicted
+// address, so `Deploy.s.sol`'s occupied-address guard asks about somewhere empty and the whole launch
+// simulates cleanly over the top of the live one. Every other check passes too, because none of them knows
+// a previous launch exists.
+//
+// So ask. The hook address is public, it is in the previous run's output, and it costs one paste.
+// `castCode(hook) === "0x"` belongs in this condition too: an artifact naming an address with no code must
+// not be read as "fresh" either, or a truthy `hook` outside a dry run skips this whole block and offers a
+// deploy with no confirmation at all. That is reachable in practice — a failed hand-run broadcast
+// overwrites `run-latest.json` after a successful launch, and the artifact then points somewhere empty
+// while the real system is live. An empty address is a question, not a conclusion.
+if (!hook || artifactIsDryRun || castCode(hook) === "0x") {
+  say();
+  warn("No broadcast record found in this directory (broadcast/ is gitignored, so it does not travel).");
+  note("That is expected on a fresh launch — and it looks identical to resuming from a clean checkout,");
+  note("another machine, or another directory, where the token may already be live. This script cannot");
+  note("tell those apart on its own, so it has to ask.");
+  say();
+  const prior = (await rl.question("  Hook address from a previous run, or blank if this is a first launch: ")).trim();
+  if (prior) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(prior)) die("That is not an address.");
+    const code = castCode(prior);          // one call, then branch on it
+    if (code === null) {
+      die("Could not reach the endpoint to check that address.", "Fix the endpoint and run again.");
+    }
+    if (code === "0x") {
+      die(`No contract exists at ${prior} on mainnet.`,
+          "Check the address. If you are certain nothing was ever deployed, run again and leave it blank.");
+    }
+    // "Has code" is not "is a PRISM hook": a code-length test alone accepts WETH with a green tick.
+    // Ask the address something only this hook answers, so a wrong paste is refused here rather than
+    // classified into a launch step. `MIGRATION_VAULT()` is an immutable getter present from construction.
+    if (castCall(prior, "MIGRATION_VAULT()(address)") === null
+        || castCall(prior, "seeded()(bool)") === null) {
+      die(`${prior} has code, but it does not answer like a PRISM v2 hook.`,
+          "It should respond to MIGRATION_VAULT() and seeded(). Check you pasted the HOOK address and not\n"
+        + "  the vault, the mirror, or another token.");
+    }
+    hook = prior;
+    artifactIsDryRun = false;
+    ok(`adopted ${hook} from your input`);
+    note("Run from the directory holding broadcast/ if you would rather it were found automatically.");
+    // Falls straight through to the classification below. It must NOT stop and ask you to run again: doing
+    // that persisted nothing, so the next run asked this same question, and the only way out of the loop was
+    // to answer "nothing is deployed" about a live system -- turning the fix into the very hazard it exists
+    // to prevent.
+  } else {
+    // Blank means "first launch". Make that an assertion the operator signs for, not a default -- and only
+    // ask it when they have actually claimed it, never after adopting an address.
+    await gate("Confirm NO PRISM v2 hook has ever been deployed by you. Deploying a second one is not"
+      + "\n  reversible and would split the supply, the pool and the airdrop across two tokens.",
+      "NOTHING IS DEPLOYED");
+  }
+}
+
 let state = "fresh";
 if (hook && !artifactIsDryRun) {
-  const code = castCall(hook, "seeded()(bool)");
-  if (code === null) { warn("a broadcast artifact exists but the hook has no code on mainnet — treating as fresh"); }
-  else {
-    const seeded = code === "true";
-    const owner  = castCall(hook, "owner()(address)");
+  // Ask whether the hook EXISTS before asking it anything. This is the one question with an unambiguous
+  // negative answer, so it is the only safe place to decide "nothing is deployed".
+  const hookCode = castCode(hook);
+  if (hookCode === null) {
+    die("Could not ask the endpoint whether the deploy is already on chain.",
+        "A broadcast artifact exists, so something may well be deployed — and an unanswered read must not be\n"
+      + "  read as 'nothing is there', because the step that follows would deploy a second complete system\n"
+      + "  over a live one. Fix the endpoint and run again.");
+  }
+  if (hookCode === "0x") {
+    warn("a broadcast artifact exists but the hook has no code on mainnet — treating as fresh");
+  } else {
+    const seededRaw = castCall(hook, "seeded()(bool)");
+    const ownerRaw  = castCall(hook, "owner()(address)");
+    // The hook has code, so these must answer. Letting either through as null would classify the launch on
+    // a missing reading: an unreadable `owner()` reads as the zero address, i.e. "already renounced", which
+    // skips the renounce, walks on to opening the airdrop, and never offers the renounce again — leaving a
+    // live owner key on a token whose whole claim is that it has none.
+    if (seededRaw === null || ownerRaw === null) {
+      die(`The hook has code but did not answer ${seededRaw === null ? "seeded()" : "owner()"}.`,
+          "That is an endpoint or ABI problem, not a state to infer from. Fix it and run again.");
+    }
+    // Take the vault from the HOOK, not from the artifact's second entry. It is an immutable constructor
+    // argument, so the hook is the authoritative source and it needs no local file — the artifact is
+    // gitignored, which means the operator resuming on another machine, or after a clean checkout, may not
+    // have it at all. The artifact is still how we find the hook; this removes the second dependency on it.
+    // Three outcomes, kept distinct on purpose. "The call failed" and "the answer was zero" are different
+    // facts with opposite consequences — conflating them would let a momentary RPC failure read as "this
+    // launch has no airdrop", which ends the wizard with congratulations while 89% of supply sits unwired.
+    const onChainVault = castCall(hook, "MIGRATION_VAULT()(address)");
+    const vaultRead = onChainVault === null ? "failed" : isZeroAddr(onChainVault) ? "none" : "ok";
+    if (vaultRead === "ok") vault = onChainVault;
+    else if (vaultRead === "none") vault = null;
+
+    const seeded = seededRaw === "true";
+    const owner  = ownerRaw;
+    // Only ask the vault anything once we know there is one, and treat silence as its own state:
+    // `isZeroAddr(null)` is true, so an unread vault would otherwise be indistinguishable from one that is
+    // present but not yet wired — and those two send the operator to different places, one irreversible.
     const token  = vault ? castCall(vault, "token()(address)") : null;
-    if (!seeded)                    state = "partial";
-    else if (!isZeroAddr(owner))    state = "seeded_not_renounced";
-    else if (isZeroAddr(token))     state = "live_airdrop_closed";
-    else                            state = "airdrop_open";
+    if (!seeded)                     state = "partial";
+    else if (!isZeroAddr(owner))     state = "seeded_not_renounced";
+    else if (vaultRead === "failed") state = "vault_unreadable";
+    else if (vaultRead === "none")   state = "live_no_airdrop";
+    else if (token === null)         state = "vault_unreadable";
+    else if (isZeroAddr(token))      state = "live_airdrop_closed";
+    else                             state = "airdrop_open";
     ok(`hook  ${hook}`);
-    ok(`vault ${vault}`);
+    ok(`vault ${vault ?? "none — this hook was deployed with no airdrop"}`);
   }
 } else if (artifactIsDryRun) {
   note("only a dry-run artifact found — nothing has been broadcast");
@@ -153,6 +344,8 @@ const WHERE = {
   fresh:                "Nothing deployed. Starting from the beginning.",
   partial:              "A deploy landed but the pool is NOT seeded — this is a partial deploy.",
   seeded_not_renounced: "Deployed and seeded. Ownership is still held.",
+  live_no_airdrop:      "Live and renounced, with no airdrop vault. The launch is complete.",
+  vault_unreadable:     "Live and renounced, but the airdrop vault did not answer.",
   live_airdrop_closed:  "Live and renounced. The airdrop is still CLOSED.",
   airdrop_open:         "The airdrop is open. Only distribution and verification remain.",
 };
@@ -163,8 +356,24 @@ if (state === "partial") {
       "Do NOT re-run the deploy. See LAUNCH.md §6 and the Troubleshooting table, finish the remaining\n  steps by hand, then run this again.");
 }
 
+if (state === "vault_unreadable") {
+  die("Stopping: a read of the airdrop vault returned nothing.",
+      "Either `MIGRATION_VAULT()` on the hook or `token()` on the vault gave no answer. That address holds\n"
+    + "  89% of the supply, so this is not a state to guess at — a failing endpoint and a vault that is not\n"
+    + "  what the hook thinks it is look identical from here. Re-run once the endpoint is healthy; if it\n"
+    + "  persists, resolve it by hand against LAUNCH.md §10b rather than continuing.");
+}
+
+if (state === "live_no_airdrop") {
+  say();
+  ok("token live, ownerless, pool seeded");
+  note("This hook has no migration vault, so there is no airdrop to open and nothing left to distribute.");
+  note("Keep the fee keeper running (LAUNCH.md §10).");
+  rl.close(); process.exit(0);
+}
+
 /** Print a signing command and run it with your terminal attached, so Foundry prompts you directly. */
-async function signStep(title, argv, { verify, expect }) {
+async function signStep(title, argv, { verify, expect, env }) {
   head(title);
   note("This is a signature. Your terminal is attached to Foundry, so a keystore password prompt or a");
   note("Ledger confirmation happens between you and Foundry — this script never sees it.");
@@ -181,7 +390,12 @@ async function signStep(title, argv, { verify, expect }) {
     : ["--account", (await rl.question("  Keystore account name: ")).trim()];
 
   await gate(`About to BROADCAST: ${title}. This cannot be undone.`, "BROADCAST");
-  run("forge", [...argv, "--sender", sender, ...signer, "--broadcast"]);
+  // `env` carries the addresses the script reads from the environment. Passing them per-step, rather than
+  // exporting them once, keeps each step's inputs visible at its own call site — and the scripts read them
+  // with `vm.envAddress`, which aborts the whole run if one is missing, so a step that forgets one cannot
+  // half-execute.
+  broadcastStarted = true;
+  run("forge", [...argv, "--sender", sender, ...signer, "--broadcast"], { env });
 
   if (verify) {
     say();
@@ -194,7 +408,7 @@ async function signStep(title, argv, { verify, expect }) {
 // ── sitting one ──────────────────────────────────────────────────────────────────────────────────
 if (state === "fresh") {
   head("0 · Build and test");
-  note("236 tests, twelve of which fork mainnet through the endpoint above. Takes a couple of minutes.");
+  note("240 tests, seventeen files of which fork mainnet through the endpoint above. A couple of minutes.");
   if (await askYes("Run the suite now? (recommended, and safe)")) run("forge", ["test"]);
   else warn("skipped — you are trusting the repo without checking it builds on your machine");
 
@@ -208,9 +422,9 @@ if (state === "fresh") {
   if (existsSync(".env")) {
     warn(".env already exists.");
     if (!await askYes("Overwrite it with a fresh one (new SALT_NONCE)?")) note("keeping the existing .env");
-    else run("sh", ["-c", "node merkle/make-env.mjs > .env"]);
+    else run("sh", ["-c", "node merkle/make-env.mjs > .env.new && mv .env.new .env || { rm -f .env.new; exit 1; }"]);
   } else {
-    run("sh", ["-c", "node merkle/make-env.mjs > .env"]);
+    run("sh", ["-c", "node merkle/make-env.mjs > .env.new && mv .env.new .env || { rm -f .env.new; exit 1; }"]);
   }
   if (!existsSync(".env")) die(".env was not written.");
   ok(".env written (contents deliberately not shown)");
@@ -236,9 +450,12 @@ if (state === "fresh") {
   await gate("Is the printed FDV the valuation you intend to launch at?", "YES");
   await gate("5 · POINT OF NO RETURN. Everything after this is irreversible. Ready to broadcast?", "I AM READY");
 
+  // No `verify` here, deliberately. `signStep` treats a verifier that returns nothing as a FAILED step, so
+  // a placeholder `() => null` made a completely successful three-transaction deploy print a red cross and
+  // "Fix the above and run again" — advice to repeat the one action in this whole procedure that must never
+  // be repeated. The next run re-detects state from the chain, which is the real check.
   await signStep("6 · Broadcast the deploy (3 transactions)",
-    ["script", "script/Deploy.s.sol", "--rpc-url", "$RPC_URL", "--slow"],
-    { verify: () => null });
+    ["script", "script/Deploy.s.sol", "--rpc-url", RPC, "--slow"], {});
   warn("Re-read the output: you need the printed hook and vault addresses for the rest.");
   note("They are also recoverable at any time from broadcast/Deploy.s.sol/1/run-latest.json.");
   say();
@@ -264,12 +481,24 @@ if (state === "seeded_not_renounced") {
   ok("enforced in code — Renounce.s.sol hard-requires seeded(), so this cannot be got wrong");
 
   await gate("9 · Renounce ownership. The token becomes permanently ownerless.", "RENOUNCE");
-  await signStep("9 · Renounce", ["script", "script/Renounce.s.sol", "--rpc-url", "$RPC_URL"], {
-    verify: () => (isZeroAddr(castCall(hook, "owner()(address)")) ? "owner() is now the zero address" : null),
-    expect: "owner() did not become zero.",
-  }, );
+  await signStep("9 · Renounce", ["script", "script/Renounce.s.sol", "--rpc-url", RPC], {
+    env: { HOOK: hook },
+    // Guard the reading before judging it. `isZeroAddr(null)` is true, so an endpoint that dies during this
+    // step would otherwise print "confirmed on-chain: owner() is now the zero address" off the back of a
+    // read that returned nothing — inventing the confirmation this line exists to provide.
+    verify: () => {
+      const o = castCall(hook, "owner()(address)");
+      return o !== null && isZeroAddr(o) ? "owner() is now the zero address" : null;
+    },
+    expect: "owner() did not become zero, or could not be read.",
+  });
 
   head("10 · Start the fee keeper");
+  // The keeper, the share check and the airdrop push all `import … from "ethers"`, and `merkle/node_modules`
+  // is gitignored — so on the tree the deploy was just run from, every one of them exits immediately with
+  // ERR_MODULE_NOT_FOUND. Step 1 mentions `npm install` only for an optional reproducibility check, which
+  // reads as "you can skip this". Say it here, where it is a prerequisite rather than a nicety.
+  say(`  ${B}First: cd merkle && npm install${R} — the keeper needs it, and it is not installed by default.`);
   say("  Run this in its own terminal, on a SEPARATE gas-only wallet — never the deploy key:");
   say(`    ${B}cd merkle && node keeper.mjs --hook ${hook} --rpc "$RPC_URL" --key $KEEPER_PK --interval 12${R}`);
   note("It signs pokeFees() indefinitely. Fees are booked when collected, so collecting often keeps the");
@@ -289,6 +518,13 @@ if (state === "seeded_not_renounced") {
 if (state === "live_airdrop_closed") {
   head("10b · Open the airdrop");
   const reserve = castCall(hook, "balanceOf(address)(uint256)", [vault]);
+  // The script re-checks this against the hook's own balance, so a wrong value fails closed rather than
+  // wiring anything. Check it here anyway: an unreadable balance means the endpoint or the vault address is
+  // wrong, and finding that out now is better than after typing the gate word for an irreversible step.
+  if (!reserve || !/^[0-9]+$/.test(reserve) || reserve === "0") {
+    die(`Could not read a reserve balance for the vault (got ${reserve === null ? "no answer" : `"${reserve}"`}).`,
+        "Expected the vault to hold the airdrop reserve. Check the endpoint and see LAUNCH.md §10b.");
+  }
   ok(`the vault holds ${reserve} wei — 89% of supply, currently not distributable`);
   say();
   say(`  ${B}This is the decision to put that supply into circulation. It cannot be undone.${R}`);
@@ -297,13 +533,13 @@ if (state === "live_airdrop_closed") {
   await gate("Has the interval you intended (10–24h) actually elapsed?", "YES IT HAS");
 
   await signStep("10b · Open the airdrop",
-    ["script", "script/OpenAirdrop.s.sol", "--rpc-url", "$RPC_URL"],
+    ["script", "script/OpenAirdrop.s.sol", "--rpc-url", RPC],
     {
+      env: { HOOK: hook, VAULT: vault, RESERVE: reserve },
       verify: () => (castCall(vault, "token()(address)")?.toLowerCase() === hook.toLowerCase()
         ? "vault is wired to the hook — the airdrop is open" : null),
       expect: "token() is not the hook.",
     });
-  process.env.HOOK = hook; process.env.VAULT = vault; process.env.RESERVE = reserve;
   say();
   ok("nothing further needs the deploy key");
   note("Run `node launch.mjs` again to continue with the distribution.");
@@ -312,7 +548,7 @@ if (state === "live_airdrop_closed") {
 
 // ── airdrop open: distribution and verification ──────────────────────────────────────────────────
 head("11 · Distribute the airdrop");
-say("  ~47 transactions, and they need NO privilege at all: the batcher is ownerless and `claim` always");
+say("  48 transactions, and they need NO privilege at all: the batcher is ownerless and `claim` always");
 say("  pays the holder regardless of who calls. Use a throwaway hot wallet with gas only.");
 note("Deploy the batcher first (LAUNCH.md §11), then run the push until it reports zero unpaid — it exits");
 note("non-zero while anyone is still owed, so it is safe to wrap in a loop.");
@@ -323,6 +559,7 @@ note("This wizard stops short of the push on purpose: it is many transactions on
 note("the runner already plans, dry-runs, resumes and refuses an infeasible plan better than a prompt can.");
 
 head("11b · Who still needs to mirror");
+note("Needs `cd merkle && npm install` first, as do the push above and the keeper — none of them run without it.");
 say(`    ${B}cd merkle && node check-shares.mjs --hook ${hook} --migration ${vault} --rpc "$RPC_URL"${R}`);
 note("Expect 5 addresses holding 288 unminted shares. `syncNFTs` is caller-only — nobody can do it for");
 note("them, so this is outreach. It also names anyone never paid; check that first.");

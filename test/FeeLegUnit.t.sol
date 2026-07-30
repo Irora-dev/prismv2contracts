@@ -318,9 +318,9 @@ contract FeeLegNonClaimer is Test {
 /// A failing collect must be OBSERVABLE, not silent.
 ///
 /// `pokeFees` deliberately swallows a POSM-side revert, because this contract is immutable with no admin
-/// and a bare revert there would be unrecoverable. The hazard is that a swallowed failure used to look
-/// exactly like "nothing accrued" — so the keeper that bounds the fee backlog could report ten healthy
-/// pokes while nothing was being collected and the backlog compounded. `PokeCollectFailed` is the alarm.
+/// and a bare revert there would be unrecoverable. The hazard is that a swallowed failure looks exactly
+/// like "nothing accrued" unless it is announced — so the keeper that bounds the fee backlog would report
+/// healthy pokes while nothing was collected and the backlog compounded. `PokeCollectFailed` is the alarm.
 contract FeeLegPokeAlarm is Test {
     address constant HOOK = address(0x2040);
     address constant OWNER = address(0xB0B);

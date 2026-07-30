@@ -29,7 +29,7 @@ contract SilentTransfer {
     function transfer(address, uint256) external {}   // note: no return value
 }
 
-/// Unit audit of the migration hardening (L2 checked transfer, L3 correctable-then-locked token,
+/// Unit coverage of the migration hardening (checked transfer, correctable-then-locked token,
 /// no-code guard) without a fork.
 contract MigrationUnit is Test {
     PrismMigration mig;
@@ -60,7 +60,7 @@ contract MigrationUnit is Test {
         tok.mint(address(mig), 1000e18);
     }
 
-    /// L3: setToken is correctable until the first claim, then permanently locked.
+    /// setToken is correctable until the first claim, then permanently locked.
     function test_SetTokenCorrectableThenLocked() public {
         tokWrong.mint(address(mig), 1);  // funded, so it clears the reserve check but is still wrong
         mig.setToken(address(tokWrong)); // oops
@@ -76,12 +76,12 @@ contract MigrationUnit is Test {
         mig.setToken(address(tok));
     }
 
-    /// Regression: a contract with a permissive fallback must not be wirable as the token.
+    /// A contract with a permissive fallback must not be wirable as the token.
     ///
-    /// Previously `setToken` checked only `code.length`, and `claim` read empty returndata as success.
-    /// So a proxy/Safe/periphery contract could be wired and every claim would "succeed" delivering
-    /// nothing: `claimed` and `tokenFinal` would latch, `pendingCount` would report the airdrop
-    /// complete, and `setToken` would be locked forever with the whole reserve stranded.
+    /// A `code.length` check alone does not stop one, and a `claim` that read empty returndata as success
+    /// would let it through: a proxy/Safe/periphery contract could be wired and every claim would
+    /// "succeed" delivering nothing — `claimed` and `tokenFinal` would latch, `pendingCount` would report
+    /// the airdrop complete, and `setToken` would be locked forever with the whole reserve stranded.
     function test_BareFallbackTokenIsRejected() public {
         BareFallback bare = new BareFallback();
         vm.expectRevert(); // NotFunded — balanceOf returns nothing, so the decode reverts
@@ -121,7 +121,7 @@ contract MigrationUnit is Test {
         assertFalse(mig.claimed(ALICE));
     }
 
-    /// L2: a failed transfer (false return) must revert and NOT mark the account claimed.
+    /// A failed transfer (false return) must revert and NOT mark the account claimed.
     function test_FailedTransferDoesNotBrick() public {
         mig.setToken(address(tok));
         tok.setMode(1); // transfer returns false
@@ -135,7 +135,7 @@ contract MigrationUnit is Test {
         assertEq(tok.balanceOf(ALICE), AMT_A);
     }
 
-    /// L2: a reverting transfer also reverts the claim (retryable).
+    /// A reverting transfer also reverts the claim (retryable).
     function test_RevertingTransferDoesNotBrick() public {
         mig.setToken(address(tok));
         tok.setMode(2); // transfer reverts

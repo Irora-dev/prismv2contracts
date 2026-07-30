@@ -30,21 +30,21 @@ contract TickProbe is Test {
         return int24(uint24(uint256(slot0) >> 160));   // Deploy.s.sol's exact expression
     }
 
-    /// The historical fixture bug, kept as a regression demonstration — and the proof of its fix.
+    /// Why a fork fixture's seed price must come from integer TickMath, never from a float formula.
     ///
-    /// `3913302148887442652215400988672` was the seed price shared by EVERY fork test in this suite. It
-    /// is neither tick 76600 nor tick 78000: it is `floor(sqrt(1.0001^78000) * 2^96)`, the float formula
-    /// the runbook warns is wrong by construction, landing 1.68e18 wei below the true tick-78000 price.
-    /// Paired with a declared `tickUpper = 76600` it opened the pool at tick 77999 — a 1,399-tick phantom
-    /// quote with no liquidity behind it, which is exactly what `Deploy.s.sol`'s post-seed tick check
-    /// rejects. So the whole fork suite was validating a pool shape production forbids.
+    /// `3913302148887442652215400988672` is neither tick 76600 nor tick 78000: it is
+    /// `floor(sqrt(1.0001^78000) * 2^96)`, the float formula the runbook warns is wrong by construction,
+    /// landing 1.68e18 wei below the true tick-78000 price. Paired with a declared `tickUpper = 76600` it
+    /// opens the pool at tick 77999 — a 1,399-tick phantom quote with no liquidity behind it, which is
+    /// exactly what `Deploy.s.sol`'s post-seed tick check rejects. A fixture like that has the fork suite
+    /// validating a pool shape production forbids.
     ///
-    /// The fixtures now use the exact integer-TickMath value. This pins both halves: the old constant
-    /// really did miss its declared tick, and the replacement really does land on it.
+    /// So use the exact integer-TickMath value. This pins both halves: the float-derived constant misses
+    /// its declared tick, and the integer one lands on it.
     function test_FloatDerivedSeedPriceMissesItsDeclaredTick() public {
         vm.createSelectFork(vm.envString("ETH_RPC_URL"), FORK_BLOCK);
 
-        uint160 floatDerived = 3913302148887442652215400988672;  // the old, wrong fixture
+        uint160 floatDerived = 3913302148887442652215400988672;  // float-derived: wrong by construction
         uint160 exactAt76600 = 3648751508805509367250261525102;  // integer TickMath at 76600
 
         IHD bad = _deploy(address(0x2040));

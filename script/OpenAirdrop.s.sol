@@ -93,6 +93,14 @@ contract OpenAirdrop is Script {
 
         // The reserve must actually be here. The hook mints it at construction, so a mismatch means
         // either the wrong vault or a partial deploy, and wiring on top of that would strand the lot.
+        //
+        // Deliberately `==`, and deliberately not `>=`. PRISM is an ordinary ERC-20, so a third party can
+        // raise this balance by one wei and nothing can lower it before `setToken` -- which does mean a
+        // stranger can make this exact check fail. That is worth living with, because RESERVE is read from
+        // the chain rather than remembered: `launch.mjs` reads `balanceOf(vault)` immediately before this
+        // step, and LAUNCH.md §10b tells a by-hand operator to do the same, so the griefer's wei is simply
+        // included and the run proceeds. Relaxing to `>=` would buy immunity to a self-healing nuisance by
+        // giving up the only check that a mistyped RESERVE is caught at all.
         require(hook.balanceOf(vaultAddr) == reserve, "vault does not hold the expected reserve");
 
         // Open the airdrop only over a live pool. This is the whole point of the split: if the pool were

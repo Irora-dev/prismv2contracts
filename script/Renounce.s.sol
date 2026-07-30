@@ -46,14 +46,37 @@ contract Renounce is Script {
     ///   so the guards are testable without mutating process-wide state. `vm.setEnv` is global and
     ///   forge runs a contract's tests in parallel, so env-driven tests race each other.
     function renounce(address hookAddr) public {
-        renounce(hookAddr, vm.envOr("MIN_SEED_LIQUIDITY", uint256(0)));
+        int256 lo = vm.envOr("SEED_TICK_LOWER", int256(0));
+        int256 hi = vm.envOr("SEED_TICK_UPPER", int256(0));
+
+        // Round-trip the narrowing instead of casting blindly. A value that does not fit `int24` is exactly
+        // the silent-truncation error the deploy guards already refuse -- 16777416 arrives as 200, a
+        // ~2,000,000x price error that otherwise deploys cleanly -- and this script must not become the one
+        // place it slips through unchecked.
+        require(int256(int24(lo)) == lo, "SEED_TICK_LOWER does not fit int24 - check the digits");
+        require(int256(int24(hi)) == hi, "SEED_TICK_UPPER does not fit int24 - check the digits");
+
+        // Zero means "not configured" for the liquidity floor, but zero is a legal tick, so the range check
+        // opts in on the two ticks differing rather than on a sentinel. An operator on an older .env that
+        // has neither is never blocked by a variable they do not have.
+        renounce(hookAddr, vm.envOr("MIN_SEED_LIQUIDITY", uint256(0)), int24(lo), int24(hi), lo != hi);
+    }
+
+    function renounce(address hookAddr, uint256 minLiquidity) public {
+        renounce(hookAddr, minLiquidity, 0, 0, false);
     }
 
     /// @dev `minLiquidity` is a parameter for the same reason `hookAddr` is: reading it from the
     ///   environment inside the checks makes the guards untestable in isolation, because `vm.setEnv` is
     ///   process-global and forge runs a contract's tests in PARALLEL — a test that sets it leaks into
     ///   every test that does not. That is not hypothetical; it broke this file's happy-path test once.
-    function renounce(address hookAddr, uint256 minLiquidity) public {
+    function renounce(
+        address hookAddr,
+        uint256 minLiquidity,
+        int24 expectedTickLower,
+        int24 expectedTickUpper,
+        bool checkRange
+    ) public {
         PrismHookV2 hook = PrismHookV2(payable(hookAddr));
 
         require(hookAddr.code.length > 0, "HOOK has no code");
@@ -68,16 +91,16 @@ contract Renounce is Script {
         // passes in that state: `setToken` on a codeless address is a call to an empty account, which
         // succeeds silently and returns nothing, and the three checks above only ever look at the hook.
         // `Deploy.s.sol`'s own post-conditions cannot catch it either — they run in simulation, where the
-        // vault always exists. This is the last transaction that can, so it does. (The vault is now
-        // deployed via CREATE2, so this state is recoverable: deploy the vault at the predicted address,
-        // run setToken, then renounce. Before that it was terminal.)
+        // vault always exists. This is the last transaction that can, so it does. (Because the vault is
+        // deployed via CREATE2, this state is recoverable rather than terminal: deploy the vault at the
+        // predicted address, run setToken, then renounce.)
         address vault = hook.MIGRATION_VAULT();
         if (vault != address(0)) {
             // This is the check that catches the failure above: code at the vault address proves the
             // reserve landed somewhere reachable rather than on a bare address.
             require(vault.code.length > 0, "MIGRATION_VAULT has no code - the airdrop reserve is unreachable");
 
-            // Wiring is NOT required here, and must not be. `setToken` opens the airdrop, and it is now a
+            // Wiring is NOT required here, and must not be. `setToken` opens the airdrop, and it is a
             // separate, deliberate step (`script/OpenAirdrop.s.sol`) run hours after launch so the float
             // can trade before 89% of the supply becomes movable. Requiring it would force the airdrop
             // open before the renounce and defeat that ordering — or, worse, tempt an operator to delay
@@ -124,6 +147,39 @@ contract Renounce is Script {
                 "seeded liquidity is below MIN_SEED_LIQUIDITY - the pool was under-seeded, do NOT renounce"
             );
             console2.log("seeded liquidity:", actual);
+        }
+
+        // Liquidity alone does NOT pin how much PRISM the seed consumed. A mint deposits
+        // `L * (sqrtUpper - sqrtLower) / 2**96`, so the amount depends on the RANGE as much as on `L` --
+        // `merkle/seed-params.mjs` says as much: PRISM per unit of liquidity depends entirely on the tick.
+        // So the check above is satisfied to the wei by a hand-run `seed()` that typed the right liquidity
+        // over the wrong range, which strands the float exactly as a dropped digit in the liquidity would:
+        // measured at 539.897 PRISM (98.99% of the float, 10.8% of supply) left in a contract one
+        // transaction away from being ownerless, with the liquidity floor reporting success.
+        //
+        // The range is the missing input, so compare what the hook RECORDED against what was intended.
+        // `seed()` stores both ticks, so this needs no TickMath (the vendored v4-core has none) and no
+        // position-manager decoding. Reading the hook rather than a balance also makes it ungriefable: a
+        // third party can raise the hook's PRISM balance with a one-wei transfer, and a check that refused
+        // on that would hand anyone a permanent block on the renounce -- which leaves a live owner key on a
+        // token documented as having none, a worse outcome than the typo.
+        if (checkRange) {
+            require(
+                hook.globalTickLower() == expectedTickLower && hook.globalTickUpper() == expectedTickUpper,
+                "seeded range does not match SEED_TICK_LOWER/SEED_TICK_UPPER - the pool was seeded over the wrong range, do NOT renounce"
+            );
+            console2.log("seeded range verified against the configured ticks");
+        }
+
+        // Say so when a check did NOT run. Both are opt-in so that an operator on an older .env is never
+        // blocked by a variable they do not have — but "no message" then looks identical to "checked and
+        // fine", and the hand-run path that most needs these checks is exactly the one likeliest to be
+        // missing the environment that arms them.
+        if (minLiquidity == 0) {
+            console2.log("NOTE: seed-size check SKIPPED - MIN_SEED_LIQUIDITY is not set (source your .env)");
+        }
+        if (!checkRange) {
+            console2.log("NOTE: seed-range check SKIPPED - SEED_TICK_LOWER/UPPER not set (source your .env)");
         }
 
         vm.startBroadcast();

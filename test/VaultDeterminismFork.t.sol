@@ -56,23 +56,22 @@ contract VaultDeterminismFork is Test {
     }
 
     /// The recovery property, stated directly: an address that the hook has already been told about can
-    /// still be filled in afterwards. Under the old `new`-based deploy this was impossible, which is
-    /// what made the 89%-of-supply state terminal rather than merely bad.
+    /// still be filled in afterwards. A `new`-based deploy makes that impossible, which is what would turn
+    /// the 89%-of-supply state from bad into terminal.
     function test_AVaultAddressTheHookAlreadyKnowsCanStillBeFilledInLater() public {
         address predicted = d.vaultAddressFor(OWNER, ROOT, NONCE);
         assertEq(predicted.code.length, 0, "precondition: nothing deployed there yet");
 
-        // The hook would have been constructed with `predicted` and minted the reserve to it while it
-        // was still codeless — the exact failure state. Recovery is simply deploying it now.
+        // Model the failure state: the hook is constructed with `predicted` and mints the reserve to it
+        // while it is still codeless. Recovery is simply deploying it now.
         address recovered = d.deployVaultIfAbsent(OWNER, ROOT, NONCE);
         assertEq(recovered, predicted, "recovery did not reach the address the hook was given");
         assertGt(recovered.code.length, 0, "recovery deployed nothing");
 
         // The claim this test is named for is that the recovered vault can be WIRED — without that,
-        // reaching the address recovers nothing and the reserve is still lost. This previously asserted
-        // `token() == address(0)`, which is true of any fresh vault whether or not it can ever be wired;
-        // it could not fail, and that is precisely how a critical bug shipped green underneath it. Assert
-        // the reachable-deployer property instead.
+        // reaching the address recovers nothing and the reserve is still lost. Do NOT state that as
+        // `token() == address(0)`: that is true of any fresh vault whether or not it can ever be wired, so
+        // it cannot fail. Assert the reachable-deployer property instead.
         assertEq(PrismMigration(recovered).deployer(), OWNER, "recovered vault cannot be wired by the launch key");
     }
 

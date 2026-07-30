@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 
-/// AUDIT ROUND 2 — CONTRACTS. Closes a real gap in `test/InvariantPrism.t.sol`:
+/// Conservation of both fee legs, tightening what `test/InvariantPrism.t.sol` asserts:
 /// `invariant_ethSolvency` asserts only `hook.balance >= Sum pendingETH`, i.e. the REALIZED half of
 /// the ETH liability. The unrealized half — `(accFeesPerShareETH - debt)/ACC_SCALE` summed over every
 /// live share — is never included, and the mock POSM is dealt 1,000,000 ETH, so the slack is many

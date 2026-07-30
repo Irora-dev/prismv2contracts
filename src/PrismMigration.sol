@@ -40,11 +40,10 @@ contract PrismMigration {
     /// @param _deployer The address permitted to call `setToken`. Passed explicitly rather than taken
     ///   from `msg.sender`, because this contract is deployed through the canonical CREATE2 factory and
     ///   the factory is the direct caller of `CREATE2` — so `msg.sender` here is the FACTORY, whose entire
-    ///   69-byte runtime contains no CALL opcode of any kind. Deriving `deployer` from it therefore made
-    ///   `setToken` unreachable by anyone, forever: the deploy aborted in simulation, and any hand-run
-    ///   variant that landed the hook anyway would have minted 89% of the supply into a vault that could
-    ///   never be wired to a token and has no sweep. Deterministic deployment and a usable `deployer` are
-    ///   only compatible if the deployer is an argument.
+    ///   69-byte runtime contains no CALL opcode of any kind. Deriving `deployer` from it would therefore
+    ///   make `setToken` unreachable by anyone, forever — and any run that landed the hook would mint 89%
+    ///   of the supply into a vault that could never be wired to a token and has no sweep. Deterministic
+    ///   deployment and a usable `deployer` are only compatible if the deployer is an argument.
     ///
     ///   Passing a wrong address here is not a new trust assumption but it IS unrecoverable, so
     ///   `Deploy.s.sol` asserts `deployer()` on-chain after deploying. Note also that this argument is
@@ -86,11 +85,11 @@ contract PrismMigration {
         bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(account, amount))));
         if (!_verify(proof, leaf)) revert InvalidProof();
         // Latch only AFTER the proof verifies, so a bogus claim cannot end the `setToken` correction
-        // window. (An earlier version ran this first; a revert rolled it back, so it was never reachable —
-        // but it made the ordering depend on that, which is fragile.)
+        // window. Keep that order: latching before the proof check would leave the window's lifetime
+        // depending on a revert to roll the latch back, which is fragile even where it holds.
         if (!tokenFinal) tokenFinal = true; // first VALID claim locks the token address
         claimed[account] = true;                 // effects before interaction (CEI)
-        // [L2] Checked transfer: reverts on a false return or a failed call, so a claim can never
+        // Checked transfer: reverts on a false return or a failed call, so a claim can never
         // mark `claimed` without actually delivering the tokens. A standards-compliant ERC-20 returns
         // exactly one 32-byte bool; anything shorter (notably the empty returndata of a bare
         // fallback) is rejected rather than read as success.
