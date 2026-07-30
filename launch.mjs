@@ -385,9 +385,49 @@ async function signStep(title, argv, { verify, expect, env }) {
   say("    1) hardware wallet (Ledger/Trezor) — you confirm on the device");
   say("    2) encrypted keystore — Foundry will prompt for the password");
   const how = (await rl.question("  Choose 1 or 2: ")).trim();
-  const signer = how === "1"
-    ? ["--ledger"]
-    : ["--account", (await rl.question("  Keystore account name: ")).trim()];
+  let signer;
+  if (how === "1") {
+    // Ask which account. Foundry defaults to m/44'/60'/0'/0/0 — the FIRST account on the device — and a
+    // deployer is very often not that one. Without this the wizard cannot reach a key on any other index at
+    // all, and the operator learns that only when Foundry fails at the signing prompt, one keystroke after
+    // the point-of-no-return gate.
+    say();
+    note("Which account on the device? Press Enter for the first, or give the path if your deployer is");
+    note("elsewhere — m/44'/60'/0'/0/1 is the second; Ledger Live's second is m/44'/60'/1'/0/0.");
+    const hdPath = (await rl.question("  Derivation path [m/44'/60'/0'/0/0]: ")).trim();
+    signer = ["--ledger"];
+    if (hdPath) {
+      if (!/^m(\/\d+'?)+$/.test(hdPath)) {
+        die(`"${hdPath}" is not a BIP-32 path.`, "Expected something like m/44'/60'/0'/0/1.");
+      }
+      signer.push("--hd-path", hdPath);
+    }
+
+    // Confirm the device holds the address that was typed, BEFORE any gate. This asks the Ledger the same
+    // question forge is about to, so a wrong path or a wrong --sender is refused here, in the read-only
+    // phase where every other configuration check in this system lives.
+    say();
+    note("Checking the device holds that address (confirm on the Ledger if it asks)…");
+    const probe = ["wallet", "address", "--ledger"];
+    if (hdPath) probe.push("--hd-path", hdPath);
+    let onDevice;
+    try {
+      onDevice = execFileSync("cast", probe, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    } catch (e) {
+      die("Could not read an address from the Ledger.",
+          redact([String(e.stderr ?? "").trim(), String(e.message ?? e).trim()]
+            .filter(Boolean).join("\n").split("\n").slice(0, 3).join("\n"))
+          + "\n  Is it plugged in, unlocked, with the Ethereum app open?");
+    }
+    if (onDevice.toLowerCase() !== sender.toLowerCase()) {
+      die(`The Ledger holds ${onDevice} on that path, not ${sender}.`,
+          "Either the derivation path is wrong or the deployer address is. Nothing has been signed — run\n"
+        + "  again with the path that matches your deployer, or the address that matches your path.");
+    }
+    ok(`device holds ${onDevice}${hdPath ? ` at ${hdPath}` : " at the default path"}`);
+  } else {
+    signer = ["--account", (await rl.question("  Keystore account name: ")).trim()];
+  }
 
   await gate(`About to BROADCAST: ${title}. This cannot be undone.`, "BROADCAST");
   // `env` carries the addresses the script reads from the environment. Passing them per-step, rather than
